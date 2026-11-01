@@ -1,0 +1,1440 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+<title>Spotify Widget</title>
+<style>
+  /* 앨범커버에서 뽑은 색이 부드럽게 바뀌도록 등록 */
+  @property --accent { syntax: "<color>"; inherits: true; initial-value: #1ed760; }
+  :root {
+    --accent: #1ed760;
+    --text: #fff;
+    --sub: rgba(255, 255, 255, .7);
+    transition: --accent .8s;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%;
+    background: transparent;
+    overflow: hidden;
+    font-family: "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", "Segoe UI", system-ui, sans-serif;
+    color: var(--text);
+    user-select: none;
+  }
+  body { padding: 8px; }
+
+  /* ---------- 카드 ---------- */
+  .card {
+    position: relative;
+    width: 100%; height: 100%;
+    border-radius: 26px;
+    overflow: hidden;
+    background: #181818;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, .45), inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 35%, transparent);
+    display: flex; flex-direction: column;
+    cursor: grab;
+  }
+  .card:active { cursor: grabbing; }
+  .bg {
+    position: absolute; inset: -30px;
+    background: center / cover no-repeat;
+    filter: blur(28px) brightness(.5) saturate(1.4);
+    transition: background-image .6s;
+  }
+  .card::after { /* 위아래 살짝 어둡게 + 대표색 은은하게 */
+    content: ""; position: absolute; inset: 0;
+    background:
+      radial-gradient(circle at 50% 45%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 70%),
+      linear-gradient(rgba(0,0,0,.25), transparent 30%, transparent 60%, rgba(0,0,0,.55));
+  }
+  .card > :not(.bg) { position: relative; z-index: 1; }
+
+  .head {
+    display: flex; align-items: center; gap: 6px;
+    padding: 12px 14px 0;
+    font-size: 10px; font-weight: 700; letter-spacing: .12em;
+    color: var(--sub);
+  }
+  .head svg { width: 14px; height: 14px; fill: var(--accent); }
+  .eq { margin-left: auto; display: flex; gap: 2px; align-items: flex-end; height: 10px; }
+  .eq i { width: 2px; height: 100%; background: var(--accent); border-radius: 1px; transform-origin: bottom; animation: eq .9s ease-in-out infinite; animation-play-state: paused; transform: scaleY(.3); }
+  .eq i:nth-child(2) { animation-delay: -.3s; }
+  .eq i:nth-child(3) { animation-delay: -.6s; }
+  .playing .eq i { animation-play-state: running; }
+  @keyframes eq { 0%,100% { transform: scaleY(.3); } 50% { transform: scaleY(1); } }
+
+  /* 좋아요 */
+  .like {
+    border: 0; background: none; cursor: pointer; padding: 0;
+    width: 16px; height: 16px; display: none;
+  }
+  .like svg { width: 16px; height: 16px; fill: none; stroke: var(--sub); stroke-width: 2; transition: fill .2s, stroke .2s, transform .2s; }
+  .like:hover svg { stroke: #fff; transform: scale(1.15); }
+  .like.on svg { fill: var(--accent); stroke: var(--accent); }
+  .like.pop svg { animation: pop .35s; }
+  @keyframes pop { 50% { transform: scale(1.4); } }
+  .widget .like.ready { display: block; }
+
+  /* ---------- LP 턴테이블 ---------- */
+  .stage { flex: 1; position: relative; min-height: 0; container-type: size; }
+  .deck { position: absolute; inset: 0; display: grid; place-items: center; }
+  .disc {
+    height: 88cqh; aspect-ratio: 1;
+    border-radius: 50%;
+    background:
+      radial-gradient(circle, transparent 0 31%, rgba(255,255,255,.05) 31.5% 32%, transparent 32.5%),
+      repeating-radial-gradient(circle, #111 0 2px, #1c1c1c 2px 3px),
+      #111;
+    box-shadow: 0 8px 22px rgba(0,0,0,.6), inset 0 0 0 2px rgba(255,255,255,.04);
+    display: grid; place-items: center;
+    position: relative;
+    will-change: transform;
+  }
+  .sheen { /* 빛 반사: 판과 같이 돌지 않아야 진짜 같음 */
+    position: absolute; height: 88cqh; aspect-ratio: 1; border-radius: 50%; pointer-events: none;
+    background: conic-gradient(from 30deg, transparent 0 20%, rgba(255,255,255,.08) 25%, transparent 30% 70%, rgba(255,255,255,.08) 75%, transparent 80%);
+  }
+  .cover {
+    width: 62%; aspect-ratio: 1; border-radius: 50%;
+    background: #333 center / cover no-repeat;
+    position: relative;
+  }
+  .cover::after { /* 가운데 구멍 */
+    content: ""; position: absolute; left: 50%; top: 50%;
+    width: 14%; aspect-ratio: 1; border-radius: 50%;
+    transform: translate(-50%, -50%);
+    background: #181818;
+    box-shadow: inset 0 0 0 2px rgba(0,0,0,.4);
+  }
+
+  /* 톤암: 재생하면 판 위로 내려오고, 멈추거나 곡이 바뀌면 들려 나감 */
+  .pivot {
+    position: absolute; left: calc(50cqw + 48cqh); top: 6cqh;
+    width: 11cqh; height: 11cqh; border-radius: 50%;
+    transform: translate(-50%, -50%);
+    background: radial-gradient(circle at 35% 35%, #ddd, #777 60%, #444);
+    box-shadow: 0 2px 6px rgba(0,0,0,.6);
+    z-index: 3;
+  }
+  .arm {
+    position: absolute; left: calc(50cqw + 48cqh); top: 6cqh;
+    width: 2.4cqh; height: 56cqh; margin-left: -1.2cqh;
+    border-radius: 2cqh;
+    background: linear-gradient(90deg, #888, #eee 45%, #999);
+    box-shadow: 2px 3px 6px rgba(0,0,0,.5);
+    transform-origin: 50% 0;
+    transform: rotate(var(--arm, -6deg));
+    transition: transform .9s cubic-bezier(.4, 0, .2, 1);
+    z-index: 2;
+  }
+  .arm::after { /* 헤드셸 */
+    content: ""; position: absolute; left: 50%; bottom: -5cqh;
+    width: 6cqh; height: 9cqh; border-radius: 1cqh;
+    transform: translateX(-50%);
+    background: linear-gradient(#ccc, #777);
+    box-shadow: 0 0 0 .6cqh color-mix(in srgb, var(--accent) 70%, transparent) inset;
+  }
+
+  /* 재생 조작 (위젯에서 마우스를 올리면 나타남) */
+  .controls {
+    position: absolute; left: 50%; top: 50%;
+    transform: translate(-50%, -50%) scale(.9);
+    display: none; align-items: center; gap: 8px;
+    padding: 6px 10px; border-radius: 999px;
+    background: rgba(0, 0, 0, .55);
+    backdrop-filter: blur(6px);
+    opacity: 0; transition: opacity .2s, transform .2s;
+    z-index: 4;
+  }
+  .widget .controls { display: flex; }
+  .widget .card:hover .controls { opacity: 1; transform: translate(-50%, -50%); }
+  .ctl {
+    border: 0; background: none; cursor: pointer; color: #fff;
+    width: 30px; height: 30px; border-radius: 50%;
+    display: grid; place-items: center;
+    transition: transform .15s, background .15s;
+  }
+  .ctl:hover { transform: scale(1.12); }
+  .ctl svg { width: 16px; height: 16px; fill: currentColor; }
+  .ctl.main { width: 38px; height: 38px; background: var(--accent); color: #000; }
+  .ctl.main svg { width: 18px; height: 18px; }
+  .ctl .i-pause, .playing .ctl .i-play { display: none; }
+  .playing .ctl .i-pause { display: block; }
+
+  /* ---------- 가사 ---------- */
+  .lyric {
+    height: 18px; padding: 0 16px;
+    font-size: 12px; font-weight: 600; text-align: center;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    color: color-mix(in srgb, var(--accent) 35%, #fff);
+    text-shadow: 0 1px 4px rgba(0,0,0,.7);
+  }
+  .lyric.dim { color: var(--sub); font-weight: 400; }
+  .lyric.change { animation: lyric .35s ease-out; }
+  @keyframes lyric { from { opacity: 0; transform: translateY(6px); } }
+  .popup .lyric { display: none; }
+
+  /* ---------- 곡 정보 ---------- */
+  .info { padding: 2px 16px 10px; text-align: center; }
+  .title, .artist { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .title { font-size: 15px; font-weight: 700; }
+  .artist { font-size: 12px; color: var(--sub); margin-top: 2px; }
+  .bar { height: 3px; background: rgba(255,255,255,.15); }
+  .bar i { display: block; height: 100%; width: 0; background: var(--accent); }
+
+  /* ---------- 브레인댄스 ---------- */
+  .bar-hit { /* 얇은 진행바를 잡기 쉽게 넓힌 영역 */
+    position: absolute !important; left: 0; right: 0; bottom: 0; height: 16px;
+    z-index: 3 !important; cursor: ew-resize;
+  }
+  .popup .bar-hit { display: none; }
+  .bar { transition: height .15s; }
+  .card:has(.bar-hit:hover) .bar { height: 6px; }
+
+  .bd {
+    position: absolute !important; inset: 0; z-index: 9 !important;
+    display: flex; flex-direction: column;
+    background:
+      repeating-linear-gradient(transparent 0 2px, rgba(79, 240, 255, .04) 2px 3px),
+      radial-gradient(circle at 50% 40%, rgba(10, 40, 60, .96), rgba(3, 8, 14, .99));
+    color: #bff6ff;
+    font: 700 9px/1 ui-monospace, Menlo, Consolas, monospace; letter-spacing: .12em;
+    opacity: 0; pointer-events: none;
+  }
+  .bd.on { opacity: 1; pointer-events: auto; animation: bdIn .35s ease-out; }
+  .bd.out { animation: bdOut .35s ease-in forwards; }
+  @keyframes bdIn {
+    0% { opacity: 1; clip-path: inset(49% 0 49% 0); filter: brightness(2.5); }
+    55% { clip-path: inset(0); filter: brightness(1.4); }
+    100% { filter: none; }
+  }
+  @keyframes bdOut {
+    0% { opacity: 1; clip-path: inset(0); }
+    70% { opacity: 1; clip-path: inset(49% 0 49% 0); filter: brightness(2.5); }
+    100% { opacity: 0; clip-path: inset(50% 0 50% 0); }
+  }
+  .bd-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 14px 4px; color: #4ff0ff; text-shadow: 0 0 6px rgba(79, 240, 255, .7); }
+  .bd-rec { color: #ff3b4e; text-shadow: 0 0 6px rgba(255, 59, 78, .8); animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: .3; } }
+  .bd-time { color: #fff; font-size: 10px; letter-spacing: .06em; }
+  .bd-view { flex: 1; position: relative; display: grid; place-items: center; min-height: 0; }
+  .bd-frame {
+    height: 78%; aspect-ratio: 1; border-radius: 50%;
+    background: #111 center / cover no-repeat;
+    filter: saturate(.7) contrast(1.25) sepia(.25) hue-rotate(150deg);
+    box-shadow: 0 0 0 1px rgba(79, 240, 255, .5), 0 0 18px rgba(79, 240, 255, .25);
+  }
+  .bd-box { /* 화면을 분석하는 듯한 모서리 표시 */
+    position: absolute; height: 86%; aspect-ratio: 1; pointer-events: none;
+    background:
+      linear-gradient(#4ff0ff, #4ff0ff) 0 0 / 12px 2px, linear-gradient(#4ff0ff, #4ff0ff) 0 0 / 2px 12px,
+      linear-gradient(#4ff0ff, #4ff0ff) 100% 0 / 12px 2px, linear-gradient(#4ff0ff, #4ff0ff) 100% 0 / 2px 12px,
+      linear-gradient(#4ff0ff, #4ff0ff) 0 100% / 12px 2px, linear-gradient(#4ff0ff, #4ff0ff) 0 100% / 2px 12px,
+      linear-gradient(#4ff0ff, #4ff0ff) 100% 100% / 12px 2px, linear-gradient(#4ff0ff, #4ff0ff) 100% 100% / 2px 12px;
+    background-repeat: no-repeat;
+    filter: drop-shadow(0 0 3px #4ff0ff);
+  }
+  .bd-scanline {
+    position: absolute; left: 12%; right: 12%; height: 2px; top: 10%;
+    background: linear-gradient(90deg, transparent, #4ff0ff, transparent);
+    box-shadow: 0 0 8px #4ff0ff; animation: scan 1.6s linear infinite;
+  }
+  @keyframes scan { to { top: 88%; } }
+  .bd-lyric {
+    position: absolute; left: 10px; right: 10px; bottom: 4px; text-align: center;
+    font: 700 12px/1.3 "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; letter-spacing: 0;
+    color: #fff; text-shadow: 0 1px 4px #000, 0 0 10px rgba(79, 240, 255, .7);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .bd-canvas { display: block; width: 100%; height: 78px; cursor: ew-resize; }
+  .bd-hint { padding: 4px 0 8px; text-align: center; font-size: 8px; color: rgba(191, 246, 255, .55); letter-spacing: .08em; }
+
+  /* ---------- 짧은 안내 ---------- */
+  .notice {
+    position: absolute !important; left: 50%; top: 34px; z-index: 5 !important;
+    transform: translate(-50%, -8px);
+    max-width: 90%; padding: 6px 12px; border-radius: 999px;
+    background: rgba(0, 0, 0, .8); font-size: 11px; white-space: nowrap;
+    opacity: 0; pointer-events: none; transition: opacity .25s, transform .25s;
+  }
+  .notice.on { opacity: 1; transform: translate(-50%, 0); }
+
+  /* ---------- 상태 메시지 ---------- */
+  .msg {
+    position: absolute !important; inset: 0; z-index: 6 !important;
+    display: none; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+    padding: 24px; text-align: center; font-size: 13px; line-height: 1.5;
+    background: rgba(18, 18, 18, .85);
+  }
+  .msg.on { display: flex; }
+  .msg code { background: rgba(255,255,255,.1); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .btn {
+    border: 0; border-radius: 999px; padding: 9px 18px;
+    background: #1ed760; color: #000; font-weight: 700; font-size: 13px;
+    cursor: pointer; font-family: inherit;
+  }
+  .btn:hover { transform: scale(1.04); }
+
+  /* ---------- 카프리 칩 ---------- */
+  .fx {
+    position: absolute !important; inset: 0; width: 100%; height: 100%;
+    z-index: 5 !important; pointer-events: none;
+  }
+  .slot { /* 칩을 꽂는 홈: 오른쪽 가장자리 가운데 */
+    position: absolute !important; right: 0; top: 50%; z-index: 4 !important;
+    width: 8px; height: 60px; margin-top: -30px;
+    border-radius: 6px 0 0 6px;
+    background: #050505;
+    box-shadow: inset 1px 0 0 rgba(255,255,255,.1);
+    opacity: 0; transition: opacity .3s, box-shadow .2s, width .2s;
+  }
+  .chip-ready .slot { opacity: 1; animation: slotPulse 1.2s ease-in-out infinite; }
+  .chip-hover .slot { opacity: 1; width: 11px; animation: none; box-shadow: 0 0 16px 5px #ff2a3c, inset 0 0 6px #ff2a3c; }
+  @keyframes slotPulse { 50% { box-shadow: 0 0 12px 3px rgba(255, 42, 60, .85); } }
+  .capri .slot {
+    opacity: 1; width: 6px;
+    background: linear-gradient(90deg, #7a0010, #ff5a6a);
+    box-shadow: 0 0 12px 2px rgba(255, 42, 60, .9);
+    animation: slotPulse .9s steps(2) infinite;
+  }
+
+  .capri .card { box-shadow: 0 6px 20px rgba(0,0,0,.45), inset 0 0 0 1.5px rgba(255, 42, 60, .8), inset 0 0 26px rgba(255, 20, 40, .35); }
+  .capri .disc { box-shadow: 0 0 20px rgba(255, 42, 60, .6), 0 8px 22px rgba(0,0,0,.6); }
+  .capri .cover { animation: coverGlitch 4.3s steps(1) infinite; }
+  @keyframes coverGlitch {
+    0%, 90%, 100% { filter: none; }
+    91% { filter: hue-rotate(-30deg) saturate(2) contrast(1.4); }
+    93% { filter: invert(.15) sepia(1) saturate(6) hue-rotate(-40deg); }
+    95% { filter: none; }
+    96% { filter: saturate(3) brightness(1.3); }
+  }
+  .capri .title { animation: glitch 3.2s steps(1) infinite; }
+  .capri #headLabel { color: #ff3b4e; text-shadow: 0 0 6px rgba(255, 42, 60, .8); animation: glitch 2.6s steps(1) infinite; }
+  @keyframes glitch {
+    0%, 90%, 100% { text-shadow: none; transform: none; }
+    91% { text-shadow: -2px 0 #ff2a3c, 2px 0 #00e5ff; transform: translateX(1px); }
+    94% { text-shadow: 2px 0 #ff2a3c, -2px 0 #00e5ff; transform: translateX(-2px) skewX(-10deg); }
+    97% { text-shadow: -1px 0 #ff2a3c; transform: none; }
+  }
+
+  .card.shock { animation: shock .6s linear; }
+  @keyframes shock {
+    10% { transform: translate(-3px, 2px); } 20% { transform: translate(3px, -2px); }
+    30% { transform: translate(-2px, -3px); } 40% { transform: translate(2px, 3px); }
+    55% { transform: translate(-1px, 1px); } 70% { transform: translate(1px, -1px); } 100% { transform: none; }
+  }
+  .flash {
+    position: absolute !important; inset: 0; z-index: 5 !important; pointer-events: none;
+    background: radial-gradient(circle at 100% 50%, rgba(255, 60, 80, .9), rgba(255, 0, 30, .3) 55%, transparent 85%);
+    opacity: 0;
+  }
+  .flash.on { animation: flash .8s ease-out; }
+  @keyframes flash { 0% { opacity: 1; } 12% { opacity: .2; } 22% { opacity: .9; } 35% { opacity: .3; } 100% { opacity: 0; } }
+  .linked {
+    position: absolute !important; left: 0; right: 0; top: 50%; z-index: 7 !important;
+    text-align: center; pointer-events: none;
+    font: 800 15px/1.4 ui-monospace, Menlo, Consolas, monospace; letter-spacing: .2em;
+    color: #ff3b4e; text-shadow: 0 0 10px #ff2a3c, -2px 0 rgba(0, 229, 255, .8), 0 2px 4px #000;
+    opacity: 0;
+  }
+  .linked small { display: block; font-size: 9px; letter-spacing: .3em; color: #ffd0d5; }
+  .linked.on { animation: linked 2s steps(1) forwards; }
+  @keyframes linked {
+    0% { opacity: 1; transform: skewX(-12deg) translateX(-4px); }
+    6% { opacity: 0; } 10% { opacity: 1; transform: none; }
+    80% { opacity: 1; } 84% { opacity: 0; } 88% { opacity: 1; transform: translateX(3px); } 100% { opacity: 0; }
+  }
+
+  /* 칩을 꽂으면 카프리 홀로그램 잔상이 지직거리며 나타났다 흩어짐 */
+  .capri-ghost {
+    position: absolute !important; left: 50%; top: 14%; z-index: 6 !important;
+    width: 62%; aspect-ratio: 1; margin-left: -31%;
+    pointer-events: none; opacity: 0;
+  }
+  .capri-ghost .holo {
+    position: absolute; inset: 0;
+    /* 홀로그램 줄무늬 */
+    -webkit-mask-image: repeating-linear-gradient(#000 0 2px, rgba(0,0,0,.35) 2px 3px);
+            mask-image: repeating-linear-gradient(#000 0 2px, rgba(0,0,0,.35) 2px 3px);
+  }
+  .capri-ghost svg, .capri-ghost img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .capri-ghost .h-main { filter: drop-shadow(0 0 6px #ff2a3c) drop-shadow(0 0 16px rgba(255, 42, 60, .6)); }
+  .capri-ghost .h-cyan, .capri-ghost .h-pink { mix-blend-mode: screen; opacity: .55; }
+  .capri-ghost .h-cyan { filter: brightness(0) invert(1) sepia(1) saturate(6) hue-rotate(140deg); }
+  .capri-ghost .h-pink { filter: brightness(0) invert(1) sepia(1) saturate(6) hue-rotate(280deg); }
+  /* capri.png 를 넣었을 때: 원래 색을 살리고, 어두운 배경은 screen 으로 비쳐 보이게 */
+  .capri-ghost.has-img { width: 100%; margin-left: -50%; top: 12%; aspect-ratio: 16 / 10; }
+  .capri-ghost.has-img .holo {
+    -webkit-mask-image:
+      repeating-linear-gradient(#000 0 2px, rgba(0,0,0,.45) 2px 3px),
+      radial-gradient(ellipse 50% 50% at 50% 50%, #000 45%, transparent 100%);
+    -webkit-mask-composite: source-in;
+            mask-image:
+      repeating-linear-gradient(#000 0 2px, rgba(0,0,0,.45) 2px 3px),
+      radial-gradient(ellipse 50% 50% at 50% 50%, #000 45%, transparent 100%);
+            mask-composite: intersect;
+  }
+  .capri-ghost.has-img .h-main { mix-blend-mode: normal; filter: contrast(1.25) saturate(1.4) drop-shadow(0 0 8px rgba(255, 42, 60, .6)); }
+  .capri-ghost.has-img .h-cyan { filter: contrast(1.4) hue-rotate(150deg) saturate(2); opacity: .4; }
+  .capri-ghost.has-img .h-pink { filter: contrast(1.4) hue-rotate(-70deg) saturate(2); opacity: .4; }
+
+  .capri-ghost.on { animation: ghostLife 2.6s linear forwards; }
+  .capri-ghost.on .h-cyan { animation: splitL 2.6s steps(1) forwards; }
+  .capri-ghost.on .h-pink { animation: splitR 2.6s steps(1) forwards; }
+  .capri-ghost.on .h-main { animation: slices 2.6s steps(1) forwards; }
+  @keyframes ghostLife {
+    0% { opacity: 0; transform: scale(1.08); filter: blur(3px); }
+    6% { opacity: .8; transform: none; filter: none; }
+    9% { opacity: .15; } 12% { opacity: .75; } 14% { opacity: .35; } 17% { opacity: .8; }
+    60% { opacity: .72; transform: translateY(-2px); }
+    66% { opacity: .35; } 68% { opacity: .85; }
+    82% { opacity: .55; transform: translateY(-6px) scaleX(1.04); filter: blur(.5px); }
+    100% { opacity: 0; transform: translateY(-14px) scaleX(1.1); filter: blur(5px); }
+  }
+  @keyframes splitL { 0%, 100% { transform: none; } 8% { transform: translate(-5px, 1px); } 13% { transform: translate(-2px, 0); } 20% { transform: translate(-1px, 0); } 66% { transform: translate(-7px, -1px); } 72% { transform: translate(-2px, 0); } 85% { transform: translate(-10px, 0); } }
+  @keyframes splitR { 0%, 100% { transform: none; } 8% { transform: translate(5px, -1px); } 13% { transform: translate(2px, 0); } 20% { transform: translate(1px, 0); } 66% { transform: translate(7px, 1px); } 72% { transform: translate(2px, 0); } 85% { transform: translate(10px, 0); } }
+  /* 가로로 썰린 듯 어긋나다가 위에서부터 흩어짐 */
+  @keyframes slices {
+    0%, 20%, 30%, 64%, 70% { clip-path: inset(0); transform: none; }
+    10% { clip-path: polygon(0 0, 100% 0, 100% 38%, 0 38%, 0 44%, 100% 44%, 100% 100%, 0 100%); transform: translateX(3px); }
+    27% { clip-path: inset(0 0 0 0); transform: skewX(-6deg); }
+    66% { clip-path: polygon(0 0, 100% 0, 100% 55%, 0 55%, 0 61%, 100% 61%, 100% 100%, 0 100%); transform: translateX(-4px); }
+    78% { clip-path: inset(12% 0 0 0); transform: translateX(3px); }
+    86% { clip-path: inset(34% 0 0 0); transform: translateX(-5px); }
+    93% { clip-path: inset(62% 0 0 0); transform: translateX(6px); }
+    100% { clip-path: inset(100% 0 0 0); }
+  }
+
+  /* ---------- 산데비스탄 ---------- */
+  .sandy-btn {
+    display: none;
+    border: 1px solid #7dffb0; border-radius: 4px; background: rgba(0, 0, 0, .35);
+    color: #7dffb0; cursor: pointer; padding: 2px 5px;
+    font: 800 8px/1 ui-monospace, Menlo, Consolas, monospace; letter-spacing: .1em;
+    text-shadow: 0 0 4px #2bff7a;
+    transition: transform .15s, background .15s;
+  }
+  .sandy-btn:hover { transform: scale(1.08); background: rgba(43, 255, 122, .2); }
+  .sandy-btn:disabled { opacity: .35; cursor: default; transform: none; }
+  .widget .sandy-btn.ready { display: block; }
+
+  .ghosts { position: absolute; inset: 0; pointer-events: none; }
+  .ghost { /* 판 모양의 반투명 색 잔상 */
+    position: absolute; left: 50%; top: 50%;
+    height: 88cqh; aspect-ratio: 1; border-radius: 50%;
+    display: grid; place-items: center;
+    background: radial-gradient(circle,
+      transparent 0 30%, hsl(var(--h) 100% 50% / .35) 31%,
+      hsl(var(--h) 100% 45% / .18) 70%, hsl(var(--h) 100% 65% / .75) 97%, transparent 100%);
+    box-shadow: 0 0 14px hsl(var(--h) 100% 55% / .7);
+    mix-blend-mode: screen; opacity: 0;
+    transition: opacity .4s;
+  }
+  .ghost-cover {
+    width: 62%; aspect-ratio: 1; border-radius: 50%;
+    background: center / cover no-repeat;
+    filter: sepia(1) saturate(6) hue-rotate(calc(var(--h) * 1deg - 50deg)) brightness(.85);
+    opacity: .6;
+  }
+
+  .sandy-tint {
+    position: absolute !important; inset: 0; z-index: 4 !important; pointer-events: none;
+    background:
+      repeating-linear-gradient(transparent 0 2px, rgba(0, 0, 0, .12) 2px 3px),
+      radial-gradient(circle at 50% 45%, transparent 35%, rgba(0, 40, 20, .55));
+    box-shadow: inset 0 0 0 2px rgba(125, 255, 176, .7), inset 0 0 30px rgba(43, 255, 122, .35);
+    opacity: 0; transition: opacity .35s;
+  }
+  .sandy .sandy-tint { opacity: 1; animation: tintHue 2.4s linear infinite; }
+  @keyframes tintHue { to { filter: hue-rotate(360deg); } }
+  /* 위젯 전체가 분홍/초록으로 갈라져 보이게 */
+  .sandy .card { filter: saturate(1.45) contrast(1.15) drop-shadow(3px 0 rgba(255, 0, 170, .55)) drop-shadow(-3px 0 rgba(0, 255, 150, .55)); }
+  .sandy .title, .sandy .artist, .sandy .lyric { text-shadow: -2.5px 0 rgba(255, 0, 170, .85), 2.5px 0 rgba(0, 255, 140, .85); }
+
+  /* 지나간 자리에 멈춰 남는 잔상 */
+  .ghost.echo { animation: echo 1.1s ease-out forwards; }
+  @keyframes echo {
+    0% { opacity: .7; transform: translate(-50%, -50%) translate(var(--x), var(--y)); }
+    100% { opacity: 0; transform: translate(-50%, -50%) translate(var(--x), var(--y)) scale(1.07); }
+  }
+
+  .sandy-flash {
+    position: absolute !important; inset: 0; z-index: 8 !important; pointer-events: none; opacity: 0;
+    background: radial-gradient(circle at 50% 50%, #fff, rgba(125, 255, 176, .85) 35%, rgba(43, 255, 122, .2) 70%, transparent);
+  }
+  .sandy-flash.on { animation: flashG .55s ease-out; }
+  @keyframes flashG { 0% { opacity: 1; } 18% { opacity: .35; } 30% { opacity: .9; } 100% { opacity: 0; } }
+
+  /* 끝날 때 시간이 원래대로 확 돌아옴 */
+  .card.snap { animation: snap .45s ease-out; }
+  @keyframes snap {
+    0% { transform: scale(1.05); filter: brightness(1.8) saturate(2); }
+    40% { transform: scale(.98); }
+    100% { transform: none; filter: none; }
+  }
+
+  .sandy-hud {
+    position: absolute !important; left: 14px; right: 14px; top: 30px; z-index: 6 !important;
+    pointer-events: none; opacity: 0; transition: opacity .3s;
+    font: 800 9px/1 ui-monospace, Menlo, Consolas, monospace; letter-spacing: .22em;
+    color: #b6ffd2; text-shadow: 0 0 6px #2bff7a;
+  }
+  .sandy .sandy-hud { opacity: 1; }
+  .sandy-hud .row { display: flex; justify-content: space-between; }
+  .sandy-hud .gauge { margin-top: 4px; height: 2px; background: rgba(125, 255, 176, .2); }
+  .sandy-hud .gauge i { display: block; height: 100%; width: 100%; background: #7dffb0; box-shadow: 0 0 6px #2bff7a; }
+
+  /* 척추 뒤 등 화면: 켜질 때 꽉 차게 보이다가, 켜져 있는 동안엔 은은하게 비침 */
+  .sandy-back {
+    position: absolute !important; inset: 0; z-index: 6 !important;
+    background: #000 url("sandy-back.png") center / cover no-repeat;
+    pointer-events: none; opacity: 0;
+    transition: opacity .15s;
+  }
+  .sandy-ignite .sandy-back { opacity: 1; animation: backIn .65s ease-out, backFlicker .65s steps(1); }
+  .sandy .sandy-back { opacity: .45; mix-blend-mode: screen; animation: backPulse 1.4s ease-in-out infinite; }
+  @keyframes backFlicker { 0%, 100% { opacity: 1; } 12% { opacity: .4; } 18% { opacity: 1; } 45% { opacity: .6; } 50% { opacity: 1; } }
+  @keyframes backPulse { 50% { opacity: .22; transform: scale(1.05); } }
+  @keyframes backIn {
+    0% { transform: scale(1.3); filter: brightness(2.2) blur(5px); }
+    35% { filter: brightness(1.4) blur(1px); }
+    100% { transform: none; filter: none; }
+  }
+
+  /* 등에 박힌 척추 임플란트: 가운데서 아래→위로 불이 켜지고, 왼쪽 가장자리로 붙어서 켜져 있음 */
+  .spine {
+    position: absolute !important; left: 50%; top: 50%; z-index: 7 !important;
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
+    padding: 6px 0;
+    transform: translate(-50%, -50%) scale(1);
+    filter: drop-shadow(0 4px 8px rgba(0,0,0,.7));
+    pointer-events: none; opacity: 0;
+    transition: transform .55s cubic-bezier(.5, 0, .2, 1), opacity .3s;
+  }
+  .spine i { /* 척추뼈 한 마디 */
+    position: relative; display: block;
+    width: 24px; height: 13px; border-radius: 4px 4px 6px 6px;
+    background: linear-gradient(90deg, #2a2f35, #8e959d 45%, #3a4047);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.35), inset 0 -2px 0 rgba(0,0,0,.4);
+  }
+  .spine i::before { /* 가운데 빛나는 코어 */
+    content: ""; position: absolute; left: 50%; top: 50%;
+    width: 10px; height: 5px; margin: -2.5px 0 0 -5px; border-radius: 2px;
+    background: #0d2a1a;
+    transition: background .15s, box-shadow .15s;
+  }
+  .spine i::after { /* 양옆 날개 */
+    content: ""; position: absolute; top: 3px; left: -9px; right: -9px; height: 5px;
+    border-radius: 3px; z-index: -1;
+    background: linear-gradient(90deg, #555c64, #23272c 30%, transparent 30% 70%, #23272c 70%, #555c64);
+  }
+  .spine.ignite, .spine.docked { opacity: 1; }
+  .spine.ignite { transform: translate(-50%, -50%) scale(1.25); filter: drop-shadow(0 4px 8px rgba(0,0,0,.7)) drop-shadow(0 0 10px rgba(43, 255, 122, .5)); }
+  .spine.ignite i::before { animation: vertOn .2s forwards; animation-delay: calc((10 - var(--i)) * 50ms); }
+  .spine.docked { transform: translate(calc(-50% - 124px), -50%) scale(.5); }
+  .spine.docked i::before { background: #7dffb0; box-shadow: 0 0 6px #2bff7a, 0 0 12px rgba(43, 255, 122, .6); animation: vertPulse 1.2s ease-in-out infinite; animation-delay: calc(var(--i) * 90ms); }
+  .spine.off { opacity: 0; transition-delay: .5s; transform: translate(calc(-50% - 124px), -50%) scale(.5); }
+  .spine.off i::before { animation: vertOff .15s forwards; animation-delay: calc(var(--i) * 45ms); background: #7dffb0; }
+  @keyframes vertOn {
+    0% { background: #0d2a1a; }
+    40% { background: #fff; box-shadow: 0 0 10px #fff, 0 0 18px #2bff7a; }
+    100% { background: #7dffb0; box-shadow: 0 0 6px #2bff7a, 0 0 12px rgba(43, 255, 122, .6); }
+  }
+  @keyframes vertPulse { 50% { background: #c9ffdf; box-shadow: 0 0 9px #2bff7a, 0 0 18px rgba(43, 255, 122, .8); } }
+  @keyframes vertOff { to { background: #0d2a1a; box-shadow: none; } }
+
+  .sandy-ring {
+    position: absolute !important; left: 50%; top: 50%; z-index: 5 !important;
+    width: 40px; height: 40px; margin: -20px 0 0 -20px; border-radius: 50%;
+    border: 3px solid #7dffb0; box-shadow: 0 0 18px #2bff7a, inset 0 0 12px #ff3df0;
+    pointer-events: none; opacity: 0;
+  }
+  .sandy-ring.on { animation: ring .7s cubic-bezier(.1, .7, .3, 1); }
+  @keyframes ring { 0% { opacity: 1; transform: scale(.2); } 100% { opacity: 0; transform: scale(9); } }
+
+  /* ---------- 노치 모드 ---------- */
+  :root { --menu-h: 32px; --strip-h: 26px; --notch-w: 190px; --pill-side: 46px; --pill-w: calc(var(--notch-w) + var(--pill-side) * 2); }
+  .notch-mode { padding: 0; }
+  /* 카드는 노치 아래로 펼쳐지는 검은 판. 접혀 있을 땐 노치 양옆 알약 크기로 잘려 보임 */
+  .notch-mode .card {
+    position: absolute; left: 30px; top: 0; width: 320px; height: 300px;
+    padding-top: var(--menu-h);
+    border-radius: 0 0 30px 30px;
+    background: #000; cursor: default;
+    box-shadow: none;
+    clip-path: inset(0 calc((320px - var(--pill-w)) / 2) calc(300px - var(--menu-h)) calc((320px - var(--pill-w)) / 2) round 0 0 14px 14px);
+    transition: clip-path .32s cubic-bezier(.4, 0, .2, 1);
+  }
+  /* 가사가 나오는 곡이면 접혀 있어도 노치 아래로 살짝 늘어나서 가사 한 줄을 보여줌 */
+  .notch-mode.lyric-strip:not(.expanded) .card {
+    clip-path: inset(0 calc((320px - var(--pill-w)) / 2) calc(300px - var(--menu-h) - var(--strip-h)) calc((320px - var(--pill-w)) / 2) round 0 0 16px 16px);
+  }
+  .notch-lyric {
+    position: absolute; left: 50%; top: var(--menu-h); z-index: 20;
+    width: var(--pill-w); margin-left: calc(var(--pill-w) / -2);
+    height: var(--strip-h); padding: 0 16px;
+    display: none; pointer-events: none;
+    font: 600 12px/calc(var(--strip-h) - 5px) "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+    text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    color: color-mix(in srgb, var(--accent) 30%, #fff);
+    text-shadow: 0 0 8px color-mix(in srgb, var(--accent) 60%, transparent);
+    opacity: 0; transition: opacity .12s;
+  }
+  .notch-mode .notch-lyric { display: block; }
+  .notch-mode.lyric-strip:not(.expanded) .notch-lyric { opacity: 1; transition: opacity .25s .15s; }
+  .notch-lyric.change { animation: lyric .35s ease-out; }
+  .notch-mode.expanded .card {
+    clip-path: inset(0 0 0 0 round 0 0 30px 30px);
+    transition: clip-path .5s cubic-bezier(.25, 1.35, .45, 1);
+  }
+  .notch-mode .card:active { cursor: default; }
+  .notch-mode .bg { filter: blur(28px) brightness(.35) saturate(1.4); }
+  /* 접혀 있을 땐 진짜 노치처럼 완전히 검게 */
+  .notch-mode .bg { transition: opacity .3s; }
+  .notch-mode:not(.expanded) .bg { opacity: 0; }
+  .notch-mode:not(.expanded) .card::after { opacity: 0; }
+  /* 접혀 있을 땐 내용을 숨기고, 펼쳐지면 살짝 늦게 나타남 (효과 레이어는 각자 규칙대로) */
+  .notch-mode:not(.expanded) .card > :not(.bg) { visibility: hidden; }
+  .notch-mode .card > :is(.head, .stage, .lyric, .info, .bar) { transition: opacity .25s .12s; }
+  .notch-mode:not(.expanded) .card > :is(.head, .stage, .lyric, .info, .bar) { opacity: 0; transition: opacity .1s; }
+  .notch-mode .msg { border-radius: 0 0 30px 30px; padding-top: calc(var(--menu-h) + 12px); }
+  .notch-mode:not(.expanded) .msg { opacity: 0; pointer-events: none; }
+
+  /* 노치 양옆: 왼쪽엔 돌아가는 앨범커버, 오른쪽엔 이퀄라이저 */
+  .pill {
+    position: absolute; left: 50%; top: 0; z-index: 20;
+    width: var(--pill-w); height: var(--menu-h); margin-left: calc(var(--pill-w) / -2);
+    display: none; align-items: center; justify-content: space-between;
+    padding: 0 14px 0 12px; pointer-events: none;
+  }
+  .notch-mode .pill { display: flex; }
+  .pill-cover {
+    width: 22px; height: 22px; border-radius: 50%;
+    background: #333 center / cover no-repeat;
+    box-shadow: 0 0 0 1.5px rgba(255,255,255,.12), 0 0 8px color-mix(in srgb, var(--accent) 50%, transparent);
+  }
+  .pill .eq { margin-left: 0; height: 12px; }
+  .pill .eq i { width: 2.5px; }
+  .capri .pill-cover { box-shadow: 0 0 0 1.5px #ff2a3c, 0 0 10px #ff2a3c; }
+  .sandy .pill-cover { box-shadow: 0 0 0 1.5px #7dffb0, 0 0 10px #2bff7a; }
+  .notch-mode.sandy .card { box-shadow: none; }
+
+  /* ---------- 팝업(알림) 모드 ---------- */
+  .popup .card {
+    cursor: default;
+    opacity: 0;
+    transform: translateX(110%) scale(.9);
+    transition: transform .5s cubic-bezier(.2, .9, .3, 1.15), opacity .35s;
+  }
+  .popup.show .card { opacity: 1; transform: none; }
+</style>
+</head>
+<body>
+  <div class="pill" id="pill"><div class="pill-cover" id="pillCover"></div><div class="eq"><i></i><i></i><i></i></div></div>
+  <div class="notch-lyric" id="notchLyric"></div>
+  <div class="card" id="card">
+    <div class="bg" id="bg"></div>
+    <div class="head">
+      <svg viewBox="0 0 24 24"><path d="M12 0a12 12 0 1 0 0 24 12 12 0 0 0 0-24Zm5.5 17.3a.75.75 0 0 1-1 .25c-2.85-1.74-6.43-2.13-10.65-1.17a.75.75 0 0 1-.33-1.46c4.62-1.06 8.58-.6 11.74 1.33.36.22.47.69.25 1.05Zm1.47-3.27a.94.94 0 0 1-1.29.31c-3.26-2-8.23-2.59-12.09-1.42a.94.94 0 1 1-.54-1.8c4.4-1.33 9.88-.69 13.61 1.6.44.27.58.85.31 1.3Zm.13-3.4C15.18 8.3 8.73 8.08 5 9.22a1.13 1.13 0 1 1-.66-2.16c4.28-1.3 11.4-1.05 15.9 1.62a1.13 1.13 0 0 1-1.15 1.94Z"/></svg>
+      <span id="headLabel">NOW PLAYING</span>
+      <div class="eq"><i></i><i></i><i></i></div>
+      <button class="sandy-btn" id="sandyBtn" title="산데비스탄">SANDY</button>
+      <button class="like" id="like" title="좋아요">
+        <svg viewBox="0 0 24 24"><path d="M12 20.5s-7.5-4.6-9.3-9.2C1.4 7.9 3.6 4.5 7 4.5c2 0 3.5 1.1 5 3 1.5-1.9 3-3 5-3 3.4 0 5.6 3.4 4.3 6.8-1.8 4.6-9.3 9.2-9.3 9.2Z"/></svg>
+      </button>
+    </div>
+    <div class="stage">
+      <div class="deck" id="deck">
+        <div class="disc" id="disc"><div class="cover" id="cover"></div></div>
+        <div class="sheen"></div>
+      </div>
+      <div class="ghosts" id="echoes"></div>
+      <div class="ghosts" id="ghosts"></div>
+      <div class="arm" id="arm"></div>
+      <div class="pivot"></div>
+      <div class="controls">
+        <button class="ctl" data-act="previous" title="이전 곡">
+          <svg viewBox="0 0 24 24"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg>
+        </button>
+        <button class="ctl main" data-act="toggle" title="재생/일시정지">
+          <svg class="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15L20 12z"/></svg>
+          <svg class="i-pause" viewBox="0 0 24 24"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>
+        </button>
+        <button class="ctl" data-act="next" title="다음 곡">
+          <svg viewBox="0 0 24 24"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="lyric dim" id="lyric"></div>
+    <div class="info">
+      <div class="title" id="title">재생 중인 곡 없음</div>
+      <div class="artist" id="artist">Spotify에서 음악을 틀어보세요</div>
+    </div>
+    <div class="bar"><i id="progress"></i></div>
+    <div class="bar-hit" id="barHit" title="끌어서 브레인댄스"></div>
+    <div class="bd" id="bd">
+      <div class="bd-head"><span class="bd-rec">◉ BRAINDANCE</span><span class="bd-time" id="bdTime">0:00.0 / 0:00</span></div>
+      <div class="bd-view">
+        <div class="bd-frame" id="bdFrame"></div>
+        <div class="bd-box"></div>
+        <div class="bd-scanline"></div>
+        <div class="bd-lyric" id="bdLyric"></div>
+      </div>
+      <canvas class="bd-canvas" id="bdCanvas"></canvas>
+      <div class="bd-hint">← 끌어서 훑어보기 · 놓으면 그 위치로 이동 · ESC 취소 →</div>
+    </div>
+
+    <div class="sandy-tint"></div>
+    <div class="sandy-ring" id="sandyRing"></div>
+    <div class="sandy-back"></div>
+    <div class="sandy-flash" id="sandyFlash"></div>
+    <div class="spine" id="spine"></div>
+    <div class="sandy-hud">
+      <div class="row"><span>SANDEVISTAN</span><span id="sandyTime">10.0</span></div>
+      <div class="gauge"><i id="sandyGauge"></i></div>
+    </div>
+    <div class="slot"></div>
+    <div class="flash" id="flash"></div>
+    <canvas class="fx" id="fx"></canvas>
+    <div class="capri-ghost" id="capriGhost">
+      <!-- 상반신 실루엣 (직접 그린 것). capri.png 가 있으면 그걸로 바뀜 -->
+      <template id="capriShape">
+        <svg viewBox="0 0 100 100">
+          <path fill="#ff2a3c" d="M50 8c-14 0-24 10-25 24-1 9 1 17 4 22 2 3 5 5 8 6v7c-12 3-24 9-30 19-2 3-3 7-3 14h92c0-7-1-11-3-14-6-10-18-16-30-19v-7c3-1 6-3 8-6 3-5 5-13 4-22C74 18 64 8 50 8Z"/>
+          <path fill="#ff8a95" opacity=".55" d="M26 30c2-13 12-20 24-20s22 7 24 20c-6-6-13-9-24-9S32 24 26 30Z"/>
+          <g fill="#2a0005" opacity=".75"><rect x="38" y="37" width="8" height="2.4" rx="1"/><rect x="54" y="37" width="8" height="2.4" rx="1"/></g>
+        </svg>
+      </template>
+      <div class="holo h-cyan"></div>
+      <div class="holo h-pink"></div>
+      <div class="holo h-main"></div>
+    </div>
+    <div class="linked" id="linked">CAPRI<small>ENGRAM LINKED</small></div>
+    <div class="notice" id="notice"></div>
+    <div class="msg" id="msg"></div>
+  </div>
+
+<script src="lightning.js"></script>
+<script src="sfx.js"></script>
+<script>
+  const mode = new URLSearchParams(location.search).get('mode') || 'widget';
+  const isPopup = mode === 'popup';
+  document.body.classList.add(mode);
+
+  const $ = (id) => document.getElementById(id);
+  const api = window.spotify;
+
+  /* ---------- 곡 표시 ---------- */
+  let track = null;
+  let syncedAt = 0;
+  let swapping = false;
+  let swapSeq = 0;
+
+  const position = () =>
+    track ? Math.min(track.duration, track.progress + (track.isPlaying ? performance.now() - syncedAt : 0)) : 0;
+
+  function setArt(t) {
+    const img = t?.image ? `url("${t.image}")` : '';
+    if ($('cover').style.backgroundImage !== img) {
+      $('cover').style.backgroundImage = img;
+      $('bg').style.backgroundImage = img;
+      $('pillCover').style.backgroundImage = img;
+    }
+    applyAccent(t);
+  }
+
+  function applyAccent(t = track) {
+    document.documentElement.style.setProperty('--accent', chipOn ? '#ff2a3c' : t?.accent || '#1ed760');
+  }
+
+  // 곡이 바뀌면 판을 빼고 새 판을 끼우는 애니메이션
+  async function swapRecord(t) {
+    const seq = ++swapSeq;
+    swapping = true;
+    const deck = $('deck');
+    await deck.animate([{ transform: 'none' }, { transform: 'translateX(-130%) rotate(-40deg)' }],
+      { duration: 380, easing: 'cubic-bezier(.5, 0, .9, .5)', fill: 'forwards' }).finished;
+    if (seq !== swapSeq) return;
+    setArt(track); // 그 사이 더 최신 정보가 왔을 수 있음
+    await deck.animate([{ transform: 'translateX(130%) rotate(40deg)' }, { transform: 'none' }],
+      { duration: 520, easing: 'cubic-bezier(.2, .9, .3, 1.08)', fill: 'forwards' }).finished;
+    if (seq === swapSeq) swapping = false;
+  }
+
+  function render(t) {
+    const prevId = track?.id;
+    track = t;
+    syncedAt = performance.now();
+    document.body.classList.toggle('playing', !!t?.isPlaying);
+    renderLike();
+    $('sandyBtn').classList.toggle('ready', !!t?.sandy);
+    if (!t) {
+      $('title').textContent = '재생 중인 곡 없음';
+      $('artist').textContent = 'Spotify에서 음악을 틀어보세요';
+      setArt(null);
+      $('progress').style.width = '0';
+      showLyric(null);
+      return;
+    }
+    $('title').textContent = t.title;
+    $('artist').textContent = t.artist;
+    if (!isPopup && prevId && prevId !== t.id) swapRecord(t);
+    else if (!swapping) setArt(t);
+  }
+
+  /* ---------- 좋아요 ---------- */
+  function renderLike() {
+    const liked = track?.liked;
+    $('like').classList.toggle('ready', liked === true || liked === false);
+    $('like').classList.toggle('on', liked === true);
+  }
+
+  /* ---------- 가사 ---------- */
+  let lyrics = null; // { id, lines: [{ t, text }] | null }
+  let lyricIdx = -2;
+
+  function showLyric(text, dim) {
+    const el = $('lyric');
+    if (el.textContent === text && el.classList.contains('dim') === !!dim) return;
+    el.textContent = text || '';
+    el.classList.toggle('dim', !!dim);
+    el.classList.remove('change');
+    void el.offsetWidth;
+    if (text) el.classList.add('change');
+    // 노치 아래 줄: 가사가 있으면 가사, 없으면 곡 제목 · 가수 (모양이 늘 같게)
+    const nl = $('notchLyric');
+    nl.textContent = dim && text !== '♪' && track ? `${track.title} · ${track.artist}` : text || '';
+    nl.classList.remove('change');
+    void nl.offsetWidth;
+    nl.classList.add('change');
+  }
+
+  function updateLyric() {
+    if (!track) return;
+    const lines = lyrics?.id === track.id ? lyrics.lines : null;
+    if (!lines?.length) {
+      if (lyricIdx !== -1) { lyricIdx = -1; showLyric(track.album, true); }
+      return;
+    }
+    const pos = position() + 250; // 살짝 먼저 보여줘야 자연스러움
+    let i = -1;
+    while (i + 1 < lines.length && lines[i + 1].t <= pos) i++;
+    if (i === lyricIdx) return;
+    lyricIdx = i;
+    if (i < 0) showLyric('♪', true);
+    else showLyric(lines[i].text || '♪', !lines[i].text);
+  }
+
+  /* ---------- 카프리 칩: 꽂으면 빨간 번개가 찌릿찌릿 ---------- */
+  const fx = createLightning($('fx'));
+  const sfx = createSfx();
+  // 폴더에 sandy-on.mp3 / sandy-off.mp3 같은 파일을 넣으면 그 소리를 씀
+  sfx.useFile('sandyOn', ['sandy-on.mp3', 'sandy-on.wav', 'sandy-on.m4a']);
+  sfx.useFile('sandyOff', ['sandy-off.mp3', 'sandy-off.wav', 'sandy-off.m4a']);
+  let chipOn = false;
+  let nextCrackle = 0;
+
+  // 카드 가장자리 아무 곳
+  function edgePoint(w, h) {
+    const s = Math.floor(Math.random() * 4), r = Math.random();
+    return [[r * w, 0], [w, r * h], [r * w, h], [0, r * h]][s];
+  }
+
+  // 평소에 가끔 튀는 작은 번개: 가장자리에서 안쪽으로, 또는 판 테두리에서
+  function crackle() {
+    const [w, h] = fx.size();
+    const n = 1 + Math.floor(Math.random() * 2);
+    for (let i = 0; i < n; i++) {
+      const [x, y] = edgePoint(w, h);
+      const len = 25 + Math.random() * 45;
+      const ang = Math.atan2(h * 0.45 - y, w / 2 - x) + (Math.random() - 0.5) * 1.2;
+      fx.spawn(x, y, x + Math.cos(ang) * len, y + Math.sin(ang) * len, { width: 1.4, life: 220, branches: 1 });
+    }
+  }
+
+  // 꽂는 순간: 홈에서 번개가 쏟아지고 화면이 흔들림
+  function burst() {
+    sfx.play('zap', 0.5, 0.9);
+    const [w, h] = fx.size();
+    for (let i = 0; i < 18; i++) {
+      setTimeout(() => {
+        // 오른쪽 홈에서 왼쪽으로 쏟아짐
+        const tx = w * (0.05 + Math.random() * 0.7), ty = Math.random() * h;
+        fx.spawn(w, h / 2 + (Math.random() - 0.5) * 60, tx, ty, { width: 2.6, life: 320, branches: 3 });
+      }, i * 70 + (i % 3) * 25);
+    }
+    for (const [id, cls, ms] of [['card', 'shock', 650], ['flash', 'on', 850], ['linked', 'on', 2050]]) {
+      $(id).classList.remove(cls);
+      void $(id).offsetWidth;
+      $(id).classList.add(cls);
+      setTimeout(() => $(id).classList.remove(cls), ms);
+    }
+    // 번개가 잦아들 즈음 카프리 잔상이 나타났다 흩어짐
+    setTimeout(() => {
+      const g = $('capriGhost');
+      g.classList.remove('on');
+      void g.offsetWidth;
+      g.classList.add('on');
+      sfx.play('capri');
+      setTimeout(() => g.classList.remove('on'), 2700);
+    }, 350);
+  }
+
+  // 홀로그램 세 겹(본체, 청록, 분홍)에 같은 모양을 넣음
+  function setCapriShape(make) {
+    document.querySelectorAll('#capriGhost .holo').forEach((el) => el.replaceChildren(make()));
+  }
+  setCapriShape(() => $('capriShape').content.firstElementChild.cloneNode(true));
+  // 폴더에 capri.png 를 넣어두면 그 이미지로 잔상을 만듦
+  const capriImg = new Image();
+  capriImg.onload = () => {
+    $('capriGhost').classList.add('has-img');
+    setCapriShape(() => {
+      const img = capriImg.cloneNode();
+      img.draggable = false;
+      return img;
+    });
+  };
+  capriImg.src = 'capri.png';
+
+  function setChip(state) {
+    document.body.classList.toggle('chip-ready', state === 'ready');
+    document.body.classList.toggle('chip-hover', state === 'hover');
+    const on = state === 'on';
+    if (on === chipOn) return;
+    chipOn = on;
+    document.body.classList.toggle('capri', on);
+    $('headLabel').textContent = on ? 'CAPRI // ONLINE' : 'NOW PLAYING';
+    applyAccent();
+    if (on) {
+      burst();
+      nextCrackle = performance.now() + 1800;
+    }
+  }
+
+  /* ---------- 산데비스탄: 시간이 느려지고 잔상이 남음 ---------- */
+  const SANDY_MS = 10000;
+  const SANDY_COOLDOWN_MS = 4000;
+  const GHOSTS = 9;
+  const GHOST_GAP = 9; // 잔상끼리 몇 프레임씩 떨어져 있을지
+  // 잔상 색 (색상환 각도): 초록 → 연두 → 노랑 → 분홍 → 보라 → 하늘
+  const GHOST_HUES = [140, 95, 55, 20, 320, 280, 230, 195, 165];
+  const ECHO_EVERY_MS = 180; // 이 간격마다 제자리에 멈춘 잔상을 하나씩 남김
+  let nextEcho = 0;
+  let echoHue = 0;
+  let sandyUntil = 0;
+  let sandyReadyAt = 0;
+  let sway = { x: 0, y: 0 };
+  const trail = []; // 지난 프레임들의 판 위치와 각도
+
+  const IGNITE_MS = 650; // 척추에 불이 다 들어오는 시간
+  let sandyStart = 0;
+  $('spine').replaceChildren(...Array.from({ length: 10 }, (_, i) => {
+    const v = document.createElement('i');
+    v.style.setProperty('--i', i);
+    return v;
+  }));
+
+  function setSpine(state) {
+    $('spine').className = `spine ${state}`;
+  }
+
+  // 1) 척추가 아래부터 켜지고 → 2) 링이 터지며 시간이 느려짐
+  function activateSandy() {
+    const now = performance.now();
+    if (now < sandyUntil || now < sandyReadyAt) return;
+    sandyStart = now + IGNITE_MS;
+    sandyUntil = sandyStart + SANDY_MS;
+    sandyReadyAt = sandyUntil + SANDY_COOLDOWN_MS;
+    setSpine('');
+    void $('spine').offsetWidth;
+    setSpine('ignite');
+    document.body.classList.add('sandy-ignite');
+    if (sfx.hasFile('sandyOn')) {
+      // 직접 넣은 소리 파일은 차오르는 부분까지 들어 있어서 누르자마자 틂
+      sfx.play('sandyOn');
+    } else {
+      sfx.play('sandyCharge', IGNITE_MS / 1000);
+      // 아래 마디부터 켜지는 타이밍에 맞춰 '틱'
+      for (let k = 0; k < 10; k++) setTimeout(() => sfx.play('spineTick', k), 60 + k * 50);
+    }
+    setTimeout(startSandy, IGNITE_MS);
+  }
+
+  function startSandy() {
+    setSpine('docked');
+    document.body.classList.remove('sandy-ignite');
+    // 지금 판 모습 그대로 잔상을 만듦
+    $('ghosts').replaceChildren(...Array.from({ length: GHOSTS }, (_, i) => {
+      const g = document.createElement('div');
+      g.className = 'ghost';
+      g.style.setProperty('--h', GHOST_HUES[i % GHOST_HUES.length]);
+      const cover = document.createElement('div');
+      cover.className = 'ghost-cover';
+      cover.style.backgroundImage = $('cover').style.backgroundImage;
+      g.append(cover);
+      return g;
+    }));
+    trail.length = 0;
+    document.body.classList.add('sandy');
+    $('sandyRing').classList.remove('on');
+    void $('sandyRing').offsetWidth;
+    $('sandyRing').classList.add('on');
+    replay('sandyFlash', 'on', 600);
+    if (sfx.hasFile('sandyOn')) {
+      // 소리 파일이 끝난 뒤에 낮은 '우웅'을 깔아서 겹치지 않게
+      const wait = Math.max(0, sfx.fileSeconds('sandyOn') * 1000 - IGNITE_MS);
+      setTimeout(() => { if (document.body.classList.contains('sandy')) sfx.startDrone(); }, wait);
+    } else {
+      sfx.play('sandyOn');
+      sfx.startDrone();
+    }
+  }
+
+  function replay(id, cls, ms) {
+    $(id).classList.remove(cls);
+    void $(id).offsetWidth;
+    $(id).classList.add(cls);
+    setTimeout(() => $(id).classList.remove(cls), ms);
+  }
+
+  // 지금 위치에 판 모양 잔상을 하나 찍어두고 서서히 사라지게 함
+  function spawnEcho() {
+    const g = document.createElement('div');
+    g.className = 'ghost echo';
+    g.style.setProperty('--h', GHOST_HUES[echoHue++ % GHOST_HUES.length]);
+    g.style.setProperty('--x', `${sway.x.toFixed(1)}px`);
+    g.style.setProperty('--y', `${sway.y.toFixed(1)}px`);
+    const cover = document.createElement('div');
+    cover.className = 'ghost-cover';
+    cover.style.backgroundImage = $('cover').style.backgroundImage;
+    cover.style.transform = `rotate(${angle}deg)`;
+    g.append(cover);
+    g.addEventListener('animationend', () => g.remove());
+    $('echoes').append(g);
+  }
+
+  function updateSandy(now, dt) {
+    const on = now >= sandyStart && now < sandyUntil;
+    if (now >= sandyUntil && document.body.classList.contains('sandy')) {
+      document.body.classList.remove('sandy');
+      setSpine('off'); // 위에서부터 불이 꺼짐
+      replay('card', 'snap', 500);
+      sfx.stopDrone();
+      sfx.play('sandyOff');
+    }
+    $('sandyBtn').disabled = now < sandyReadyAt;
+
+    // 켜져 있는 동안 판이 천천히 흔들리며 움직이고, 끄면 제자리로 돌아옴
+    const t = now / 1000;
+    const goal = on ? { x: Math.sin(t * 2.4) * 34 + Math.sin(t * 4.3) * 12, y: Math.sin(t * 1.6) * 12 } : { x: 0, y: 0 };
+    const k = Math.min(1, dt * 5);
+    sway.x += (goal.x - sway.x) * k;
+    sway.y += (goal.y - sway.y) * k;
+    $('deck').style.translate = `${sway.x.toFixed(1)}px ${sway.y.toFixed(1)}px`;
+
+    trail.unshift({ x: sway.x, y: sway.y, a: angle });
+    trail.length = Math.min(trail.length, GHOSTS * GHOST_GAP + 1);
+    const ghosts = $('ghosts').children;
+    for (let i = 0; i < ghosts.length; i++) {
+      const p = trail[(i + 1) * GHOST_GAP] || trail[trail.length - 1];
+      const g = ghosts[i];
+      g.style.transform = `translate(-50%, -50%) translate(${p.x}px, ${p.y}px)`;
+      g.firstChild.style.transform = `rotate(${p.a}deg)`;
+      g.style.opacity = on ? (0.55 - i * 0.05).toFixed(2) : 0;
+    }
+    if (on && now > nextEcho) {
+      spawnEcho();
+      nextEcho = now + ECHO_EVERY_MS;
+    }
+
+    if (on) {
+      const left = (sandyUntil - now) / 1000;
+      $('sandyTime').textContent = left.toFixed(1);
+      $('sandyGauge').style.width = (left / (SANDY_MS / 1000)) * 100 + '%';
+    }
+    return on;
+  }
+
+  /* ---------- 브레인댄스: 진행바를 끌면 편집기처럼 곡을 훑어보고 그 위치로 이동 ---------- */
+  const bdCanvas = $('bdCanvas');
+  const bdCtx = bdCanvas.getContext('2d');
+  const BD_LANES = [
+    { name: 'VISUAL', color: '#ff3b4e' },
+    { name: 'AUDIO', color: '#ffd23b' },
+    { name: 'THERMAL', color: '#4f9bff' },
+  ];
+  let bdOn = false;
+  let bdDragging = false;
+  let bdPos = 0;
+  let bdExitTimer = null;
+  let bdLastTick = 0;
+  let bdWave = { id: null, bars: [] };
+
+  const fmt = (ms, tenths) => {
+    const s = Math.max(0, ms) / 1000;
+    const m = Math.floor(s / 60);
+    const sec = tenths ? (s % 60).toFixed(1).padStart(4, '0') : String(Math.floor(s % 60)).padStart(2, '0');
+    return `${m}:${sec}`;
+  };
+
+  // 곡마다 늘 같은 모양이 나오도록 곡 id 로 만든 가짜 파형
+  function waveFor(t) {
+    if (bdWave.id === t.id) return bdWave.bars;
+    let h = 2166136261;
+    for (const ch of t.id) h = Math.imul(h ^ ch.charCodeAt(0), 16777619);
+    const rand = () => ((h = Math.imul(h ^ (h >>> 15), 2246822507) ^ Math.imul(h ^ (h >>> 13), 3266489909)) >>> 0) / 4294967296;
+    let v = 0.5;
+    const bars = Array.from({ length: 120 }, () => (v = Math.min(1, Math.max(0.1, v + (rand() - 0.5) * 0.4))));
+    bdWave = { id: t.id, bars };
+    return bars;
+  }
+
+  function lyricAt(ms) {
+    const lines = lyrics?.id === track?.id ? lyrics.lines : null;
+    if (!lines?.length) return null;
+    let i = -1;
+    while (i + 1 < lines.length && lines[i + 1].t <= ms) i++;
+    return i < 0 ? '♪' : lines[i].text || '♪';
+  }
+
+  function enterBD() {
+    if (!track?.duration) return false;
+    clearTimeout(bdExitTimer);
+    if (!bdOn) {
+      bdOn = true;
+      bdPos = position();
+      $('bd').className = 'bd on';
+      $('bdFrame').style.backgroundImage = $('cover').style.backgroundImage;
+      sfx.play('bdIn');
+    }
+    return true;
+  }
+
+  function scrubTo(clientX) {
+    const r = bdCanvas.getBoundingClientRect();
+    const p = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+    bdPos = p * track.duration;
+    // 끌 때마다 '틱' (너무 자주 나지 않게 곡 길이의 1/60 마다)
+    if (Math.abs(bdPos - bdLastTick) > track.duration / 60) {
+      sfx.play('bdTick');
+      bdLastTick = bdPos;
+    }
+  }
+
+  function startScrub(e) {
+    if (e.button !== 0 || !enterBD()) return;
+    e.stopPropagation();
+    bdDragging = true;
+    scrubTo(e.clientX);
+  }
+
+  // 손을 떼면 Spotify 를 그 위치로 옮기고 잠시 뒤 편집기를 닫음
+  function commitBD() {
+    bdDragging = false;
+    if (!track) return exitBD();
+    track.progress = bdPos;
+    syncedAt = performance.now();
+    lyricIdx = -2;
+    api.send('control', { type: 'seek', ms: bdPos });
+    bdExitTimer = setTimeout(exitBD, 900);
+  }
+
+  function exitBD() {
+    if (!bdOn) return;
+    clearTimeout(bdExitTimer);
+    bdOn = false;
+    bdDragging = false;
+    $('bd').className = 'bd out';
+    sfx.play('bdOut');
+  }
+
+  function drawBD() {
+    if (!track?.duration) return exitBD();
+    const dpr = window.devicePixelRatio || 1;
+    const w = bdCanvas.clientWidth, h = bdCanvas.clientHeight;
+    if (bdCanvas.width !== Math.round(w * dpr)) { bdCanvas.width = Math.round(w * dpr); bdCanvas.height = Math.round(h * dpr); }
+    const c = bdCtx;
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    c.clearRect(0, 0, w, h);
+
+    const dur = track.duration;
+    const x = (ms) => (ms / dur) * w;
+    const laneH = 18, gap = 5, top = 6;
+    const bars = waveFor(track);
+    const lines = lyrics?.id === track.id ? lyrics.lines || [] : [];
+
+    BD_LANES.forEach((lane, li) => {
+      const y = top + li * (laneH + gap);
+      c.fillStyle = 'rgba(255,255,255,.05)';
+      c.fillRect(0, y, w, laneH);
+      c.globalAlpha = 0.85;
+      if (lane.name === 'VISUAL') {
+        // 가사 한 줄마다 블록 하나 (가사가 없으면 일정 간격)
+        const cuts = lines.length ? lines.map((l) => l.t) : Array.from({ length: 12 }, (_, i) => (i * dur) / 12);
+        cuts.forEach((t0, i) => {
+          const t1 = cuts[i + 1] ?? dur;
+          c.fillStyle = i % 2 ? 'rgba(255,59,78,.55)' : 'rgba(255,59,78,.85)';
+          c.fillRect(x(t0) + 0.5, y + 3, Math.max(1, x(t1) - x(t0) - 1), laneH - 6);
+        });
+      } else if (lane.name === 'AUDIO') {
+        const bw = w / bars.length;
+        c.fillStyle = lane.color;
+        bars.forEach((v, i) => {
+          const bh = v * (laneH - 2);
+          c.fillRect(i * bw, y + (laneH - bh) / 2, Math.max(1, bw - 0.6), bh);
+        });
+        // 가사가 시작되는 지점 표시
+        c.fillStyle = '#4ff0ff';
+        for (const l of lines) c.fillRect(x(l.t), y - 2, 1, 4);
+      } else {
+        const grad = c.createLinearGradient(0, 0, w, 0);
+        bars.forEach((v, i) => grad.addColorStop(i / (bars.length - 1), `hsl(${230 - v * 200} 100% ${35 + v * 25}%)`));
+        c.fillStyle = grad;
+        c.fillRect(0, y + 3, w, laneH - 6);
+      }
+      c.globalAlpha = 1;
+      c.fillStyle = 'rgba(191,246,255,.8)';
+      c.font = '700 7px ui-monospace, Menlo, monospace';
+      c.fillText(lane.name, 4, y + 8);
+    });
+
+    // 실제 재생 위치(점선)와 훑는 위치(재생헤드)
+    const real = x(position());
+    c.strokeStyle = 'rgba(255,255,255,.5)';
+    c.setLineDash([2, 2]);
+    c.beginPath(); c.moveTo(real, 0); c.lineTo(real, h); c.stroke();
+    c.setLineDash([]);
+    const px = x(bdPos);
+    c.fillStyle = 'rgba(79,240,255,.12)';
+    c.fillRect(Math.min(px, real), 0, Math.abs(px - real), h);
+    c.strokeStyle = '#4ff0ff';
+    c.shadowColor = '#4ff0ff';
+    c.shadowBlur = 8;
+    c.lineWidth = 2;
+    c.beginPath(); c.moveTo(px, 0); c.lineTo(px, h); c.stroke();
+    c.shadowBlur = 0;
+    c.fillStyle = '#4ff0ff';
+    c.beginPath(); c.moveTo(px - 5, 0); c.lineTo(px + 5, 0); c.lineTo(px, 6); c.fill();
+
+    $('bdTime').textContent = `${fmt(bdPos, true)} / ${fmt(dur)}`;
+    $('bdLyric').textContent = lyricAt(bdPos) ?? track.title;
+    $('bdFrame').style.transform = `rotate(${((bdPos / 1000) * RPM_DEG) % 360}deg)`;
+  }
+
+  if (!isPopup) {
+    $('barHit').addEventListener('mousedown', startScrub);
+    bdCanvas.addEventListener('mousedown', startScrub);
+    // 편집기의 다른 곳을 누르면 닫기
+    $('bd').addEventListener('mousedown', (e) => { if (e.target !== bdCanvas) exitBD(); });
+    window.addEventListener('mousemove', (e) => { if (bdDragging) scrubTo(e.clientX); });
+    window.addEventListener('mouseup', () => { if (bdDragging) commitBD(); });
+    window.addEventListener('keydown', (e) => { if (e.key === 'Escape') exitBD(); });
+  }
+
+  /* ---------- 노치 모드: 알약에 마우스를 올리거나 곡이 바뀌면 펼쳐짐 ---------- */
+  let notchOn = false;
+  let expanded = false;
+  let overPill = false; // 마우스가 알약 위 → 클릭을 받아야 함
+  let hoverInside = false; // 마우스가 알약이나 펼친 카드 위
+  let leftAt = 0;
+  let peekUntil = 0;
+
+  function setMode(m) {
+    notchOn = !!m?.notch;
+    document.body.classList.toggle('notch-mode', notchOn);
+    if (notchOn) {
+      document.documentElement.style.setProperty('--menu-h', `${m.menuH}px`);
+      document.documentElement.style.setProperty('--notch-w', `${m.notchW}px`);
+    }
+    expanded = true; // 아래 setExpanded 가 확실히 알리도록
+    setExpanded(false);
+  }
+
+  function setExpanded(v) {
+    if (expanded === v) return;
+    expanded = v;
+    document.body.classList.toggle('expanded', v);
+    api.send('notch-expanded', v);
+    api.send('notch-interactive', v || overPill);
+  }
+
+  // 칩을 꽂으려는 중, 브레인댄스 중, 곡 바뀐 직후엔 접지 않음
+  const notchPinned = (now) =>
+    bdOn || now < peekUntil || document.body.classList.contains('chip-ready') || document.body.classList.contains('chip-hover');
+
+  function updateNotchHover(e) {
+    if (!notchOn) return;
+    const pr = $('pill').getBoundingClientRect();
+    const bottom = document.body.classList.contains('lyric-strip') ? $('notchLyric').getBoundingClientRect().bottom : pr.bottom;
+    const inPill = e.clientX >= pr.left && e.clientX <= pr.right && e.clientY <= bottom + 4;
+    const cr = $('card').getBoundingClientRect();
+    const inCard = expanded && e.clientX >= cr.left - 4 && e.clientX <= cr.right + 4 && e.clientY <= cr.bottom + 4;
+    if (inPill !== overPill) {
+      overPill = inPill;
+      api.send('notch-interactive', expanded || overPill);
+    }
+    const inside = inPill || inCard;
+    if (hoverInside && !inside) leftAt = performance.now();
+    hoverInside = inside;
+    if (inPill && !expanded) setExpanded(true);
+  }
+
+  function updateNotch(now) {
+    // 곡이 있으면 노치 아래 줄을 늘 보여줌 (재생/일시정지, 가사 유무로 모양이 바뀌지 않게)
+    document.body.classList.toggle('lyric-strip', !!track);
+    if (notchOn && expanded && !hoverInside && !notchPinned(now) && now - leftAt > 450) setExpanded(false);
+  }
+
+  if (!isPopup) {
+    window.addEventListener('mousemove', updateNotchHover);
+    document.addEventListener('mouseleave', () => {
+      if (hoverInside) leftAt = performance.now();
+      hoverInside = false;
+    });
+  }
+
+  /* ---------- 매 프레임: 진행바, LP 회전, 톤암, 가사, 번개 ---------- */
+  const RPM_DEG = 45; // 1초에 도는 각도
+  let angle = 0, speed = 0, last = performance.now();
+
+  (function tick(now) {
+    now = now || performance.now();
+    const dt = Math.min(0.1, (now - last) / 1000);
+    last = now;
+
+    const playing = !!track?.isPlaying;
+    // 재생하면 금방 붙고, 멈추면 천천히 서서히 멈춤
+    const slow = updateSandy(now, dt) ? 0.2 : 1; // 산데비스탄 중엔 시간이 느려짐
+    const target = playing && !swapping ? RPM_DEG * slow : 0;
+    speed += (target - speed) * Math.min(1, dt * (target > speed ? 4 : 1.6));
+    angle = (angle + speed * dt) % 360;
+    $('disc').style.transform = `rotate(${angle}deg)`;
+    if (notchOn) {
+      $('pillCover').style.transform = `rotate(${angle}deg)`;
+      updateNotch(now);
+    }
+
+    // 곡이 진행될수록 바늘이 안쪽으로 조금씩 이동
+    const p = track?.duration ? position() / track.duration : 0;
+    const armDeg = playing && !swapping ? 13 + p * 6 : -6;
+    $('arm').style.setProperty('--arm', `${armDeg.toFixed(2)}deg`);
+
+    if (track?.duration) $('progress').style.width = p * 100 + '%';
+    if (!isPopup) updateLyric();
+    if (bdOn) drawBD();
+    if (chipOn && now > nextCrackle) {
+      crackle();
+      nextCrackle = now + 700 + Math.random() * 2600;
+    }
+    fx.draw();
+    requestAnimationFrame(tick);
+  })();
+
+  /* ---------- 상태(로그인 등) ---------- */
+  function renderStatus(s) {
+    if (isPopup) return;
+    const msg = $('msg');
+    msg.classList.toggle('on', s !== 'ok');
+    if (s === 'no-client-id') {
+      msg.innerHTML = `<b>Client ID가 필요해요</b>
+        <div><code>config.json</code>에 Spotify 앱의<br>Client ID를 넣고 다시 실행하세요.</div>`;
+    } else if (s === 'logging-in') {
+      msg.innerHTML = `<div>브라우저에서 로그인을<br>완료해 주세요…</div>`;
+    } else if (s === 'logged-out' || s === 'relogin') {
+      msg.innerHTML = s === 'relogin'
+        ? `<div>재생 조작과 좋아요를 쓰려면<br>한 번만 다시 로그인해 주세요</div>`
+        : `<div>Spotify 계정을 연결하세요</div>`;
+      msg.innerHTML += `<button class="btn" id="loginBtn">Spotify 로그인</button>`;
+      $('loginBtn').onclick = () => api.send('login');
+    }
+  }
+
+  /* ---------- 짧은 안내 ---------- */
+  let noticeTimer;
+  function notice(text) {
+    $('notice').textContent = text;
+    $('notice').classList.add('on');
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => $('notice').classList.remove('on'), 2600);
+  }
+
+  /* ---------- 팝업 애니메이션 ---------- */
+  const SHOW_MS = 4500;
+  let hideTimer, doneTimer;
+
+  function popup(t) {
+    clearTimeout(hideTimer);
+    clearTimeout(doneTimer);
+    render(t);
+    document.body.classList.remove('show');
+    void document.body.offsetWidth; // 애니메이션 재시작
+    requestAnimationFrame(() => document.body.classList.add('show'));
+    hideTimer = setTimeout(() => {
+      document.body.classList.remove('show');
+      doneTimer = setTimeout(() => api.send('popup-done'), 600);
+    }, SHOW_MS);
+  }
+
+  /* ---------- 연결 ---------- */
+  if (api) {
+    if (isPopup) {
+      api.on('popup', popup);
+      api.on('track', (t) => { if (t && track && t.id === track.id) render(t); });
+    } else {
+      api.on('track', render);
+      api.on('status', renderStatus);
+      api.on('lyrics', (l) => { lyrics = l; lyricIdx = -2; });
+      api.on('notice', notice);
+      api.on('mode', setMode);
+      // 곡이 바뀌면 노치가 잠깐 펼쳐짐
+      api.on('peek', () => {
+        if (!notchOn) return;
+        peekUntil = performance.now() + 4500;
+        leftAt = performance.now();
+        setExpanded(true);
+      });
+      api.on('chip', setChip);
+      api.on('sfx', (on) => { sfx.enabled = on; });
+      api.on('sandy', activateSandy);
+      $('sandyBtn').onclick = activateSandy;
+      api.getState().then((s) => { renderStatus(s.status); lyrics = s.lyrics; render(s.track); sfx.enabled = s.sfx; setMode(s.mode); });
+
+      document.querySelectorAll('.ctl').forEach((b) => {
+        b.onclick = () => {
+          let act = b.dataset.act;
+          if (act === 'toggle') {
+            if (!track) return;
+            act = track.isPlaying ? 'pause' : 'play';
+            // 서버 응답을 기다리지 않고 바로 반영
+            track.progress = position();
+            syncedAt = performance.now();
+            track.isPlaying = !track.isPlaying;
+            document.body.classList.toggle('playing', track.isPlaying);
+          }
+          api.send('control', act);
+        };
+      });
+      $('like').onclick = () => {
+        if (!track || track.liked == null) return;
+        track.liked = !track.liked;
+        renderLike();
+        $('like').classList.remove('pop');
+        void $('like').offsetWidth;
+        $('like').classList.add('pop');
+        api.send('control', 'like');
+      };
+
+      $('card').addEventListener('mousedown', (e) => {
+        if (e.button !== 0 || e.target.closest('button, .bar-hit, .bd')) return;
+        api.send('drag-start');
+      });
+      window.addEventListener('mouseup', () => api.send('drag-end'));
+      window.addEventListener('blur', () => api.send('drag-end'));
+      window.addEventListener('contextmenu', (e) => { e.preventDefault(); api.send('context-menu'); });
+    }
+  }
+</script>
+</body>
+</html>

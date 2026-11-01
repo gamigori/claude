@@ -1,0 +1,12 @@
+{
+  "name": "spotify-spin-widget",
+  "version": "1.0.0",
+  "description": "Spotify 앨범커버가 돌아가는 정사각형 데스크톱 위젯 + 곡 변경 알림",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.2.0"
+  }
+}

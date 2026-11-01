@@ -1,0 +1,9 @@
+node_modules/
+.DS_Store
+config.json
+# 직접 넣어 쓰는 선택 파일
+capri.png
+chip.png
+sandy-back.png
+sandy-on.*
+sandy-off.*
