@@ -124,6 +124,7 @@ func topVisible(_ w: Win, x: CGFloat) -> Bool {
 final class NowPlaying {
     var playing = false
     var lyrics: [(time: Double, text: String)] = []
+    var missing = false             // 이 곡은 가사를 못 찾음
     private var position: Double = 0
     private var polledAt = CACurrentMediaTime()
     private var trackKey = ""
@@ -191,6 +192,7 @@ final class NowPlaying {
         if key != trackKey {
             trackKey = key
             lyrics = []
+            missing = false
             fetchLyrics(title: info[0], artist: info[1], album: info[2], duration: num(info[3]), key: key)
         }
     }
@@ -222,8 +224,40 @@ final class NowPlaying {
         request(exact) { json in
             if let s = (json as? [String: Any])?["syncedLyrics"] as? String { return use(s) }
             request(search) { json in
-                let hit = (json as? [[String: Any]])?.first { $0["syncedLyrics"] is String }
-                use(hit?["syncedLyrics"] as? String)
+                if let hit = (json as? [[String: Any]])?.first(where: { $0["syncedLyrics"] is String }) {
+                    return use(hit["syncedLyrics"] as? String)
+                }
+                // 괄호, feat. 를 뗀 제목으로 한 번 더, 가수 이름이 조금 달라도 (예: "검정치마 (The Black Skirts)")
+                let clean = title.replacingOccurrences(of: "\\s*[\\(\\[].*?[\\)\\]]", with: "", options: .regularExpression)
+                    .components(separatedBy: " - ")[0].trimmingCharacters(in: .whitespaces)
+                var loose = URLComponents(string: "https://lrclib.net/api/search")!
+                loose.queryItems = [URLQueryItem(name: "q", value: clean + " " + artist)]
+                var bare = URLComponents(string: "https://lrclib.net/api/search")!
+                bare.queryItems = [URLQueryItem(name: "track_name", value: clean)]
+                func pick(_ json: Any?) -> String? {
+                    let list = (json as? [[String: Any]]) ?? []
+                    let a = artist.lowercased()
+                    let ok = list.filter { (($0["artistName"] as? String) ?? "").lowercased().contains(a) || a.contains((($0["artistName"] as? String) ?? "\u{0}").lowercased()) }
+                    if let s = ok.first(where: { $0["syncedLyrics"] is String })?["syncedLyrics"] as? String { return s }
+                    // 싱크 가사가 없으면 일반 가사를 곡 길이에 고르게 나눠서
+                    if let plain = ok.first(where: { $0["plainLyrics"] is String })?["plainLyrics"] as? String, duration > 0 {
+                        let lines = plain.components(separatedBy: .newlines).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+                        guard !lines.isEmpty else { return nil }
+                        let start = duration * 0.08, step = duration * 0.85 / Double(lines.count)
+                        return lines.enumerated().map { i, l in
+                            let t = start + Double(i) * step
+                            return String(format: "[%02d:%05.2f]", Int(t) / 60, t.truncatingRemainder(dividingBy: 60)) + l
+                        }.joined(separator: "\n")
+                    }
+                    return nil
+                }
+                request(loose) { json in
+                    if let s = pick(json) { return use(s) }
+                    request(bare) { json in
+                        if let s = pick(json) { return use(s) }
+                        DispatchQueue.main.async { if self.trackKey == key { self.missing = true } }
+                    }
+                }
             }
         }
     }
@@ -942,6 +976,7 @@ final class Squirrel {
 
     // 하는 행동에 맞는 말풍선
     var actText: String? {
+        if act == .none, let l = lyric { return l }
         switch act {
         case .sing, .harmony: return lyric
         case .think(let what): return what + String(repeating: ".", count: Int(time * 2.5) % 3 + 1)
@@ -2535,12 +2570,14 @@ final class Pet {
         sq.lively = min(1, needs.mood + (sq.personality == .playful ? 0.25 : 0))
         sq.act = currentAct()
         switch sq.act {
-        case .sing: sq.lyric = music.currentLine
+        case .sing: sq.lyric = music.currentLine ?? (music.missing ? "♪ 흥얼흥얼~ (가사는 몰라)" : nil)
         case .harmony:
             // 가사가 나올 때 옆에서 화음
             let hum = ["♪ 우~ 우우~", "♪ 라~ 라라~", "♪ 음~ 음음~"][Int(sq.time / 4) % 3]
             sq.lyric = music.currentLine == nil ? nil : hum
-        default: sq.lyric = nil
+        default:
+            // 돌아다니는 중에도 노래 부르는 다람쥐는 가사를 흥얼
+            sq.lyric = lead && singAlong && music.playing && sq.act == .none && sq.mode == .floor ? music.currentLine : nil
         }
         // 테스트가 통과하면 한 번 공중제비
         if sq.act == .cheer, claude.since != lastFlip {
@@ -2581,13 +2618,13 @@ final class Pet {
                 chaseTime = 0
                 sq.say(sq.personality == .shy ? "휴… 갔나?" : "어디 갔지?")
             }
-            if chaseTime <= 0 { chaseCool = 6 }
+            if chaseTime <= 0 { chaseCool = 25 }
         } else {
             chaseCool -= dt
             // 장난꾸러기는 조금만 흔들어도 달려듦
-            let need: CGFloat = sq.personality == .playful ? 500 : 900
+            let need: CGFloat = sq.personality == .playful ? 1300 : 2000
             let free = sq.act == .none || sq.act == .sing || sq.act == .harmony
-            if chaseCool <= 0, mouseSpeed > need, dist > 60, dist < 700, free, sq.mode == .floor || sq.mode == .wall,
+            if chaseCool <= 0, mouseSpeed > need, dist > 60, dist < 260, free, sq.mode == .floor || sq.mode == .wall,
                sq.target == nil, !sq.nested, !view.dragging {
                 startChase()
             }
@@ -2609,7 +2646,7 @@ final class Pet {
         sq.say(sq.personality == .shy ? "히익! 무서워!" : "잡을 거야!", 1.2)
     }
 
-    func endChase() { chaseTime = 0; chaseCool = 6 }
+    func endChase() { chaseTime = 0; chaseCool = 25 }
 
     // 우선순위: 먹기 > 일하기 > 어디 가는 중 > Claude 반응 > 아침 인사 > 노래
     func currentAct() -> Act {
