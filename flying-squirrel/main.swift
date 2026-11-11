@@ -2639,6 +2639,75 @@ final class MapObj {
     }
 }
 
+// MARK: - 맵 프리셋 (화면 가운데 아래 기준 좌표)
+
+struct MapPreset {
+    var name: String
+    var objs: [(kind: ObjKind, dx: CGFloat, dy: CGFloat, acorns: Int)]
+    var houses: [(dx: CGFloat, dy: CGFloat)]
+
+    var saved: [String: Any] {
+        ["name": name,
+         "objs": objs.map { [$0.kind.rawValue, Double($0.dx), Double($0.dy), $0.acorns] as [Any] },
+         "houses": houses.map { [Double($0.dx), Double($0.dy)] }]
+    }
+
+    init(name: String, objs: [(kind: ObjKind, dx: CGFloat, dy: CGFloat, acorns: Int)], houses: [(dx: CGFloat, dy: CGFloat)]) {
+        self.name = name; self.objs = objs; self.houses = houses
+    }
+
+    init?(saved d: [String: Any]) {
+        guard let name = d["name"] as? String, let rows = d["objs"] as? [[Any]] else { return nil }
+        self.name = name
+        objs = rows.compactMap { r in
+            guard r.count == 4, let k = (r[0] as? String).flatMap(ObjKind.init(rawValue:)),
+                  let x = r[1] as? Double, let y = r[2] as? Double else { return nil }
+            return (k, CGFloat(x), CGFloat(y), r[3] as? Int ?? 0)
+        }
+        houses = (d["houses"] as? [[Double]] ?? []).compactMap { $0.count == 2 ? (CGFloat($0[0]), CGFloat($0[1])) : nil }
+    }
+
+    // 기준점: 주 화면 바닥 가운데
+    static var origin: CGPoint {
+        let b = NSScreen.screens[0].visibleFrame
+        return CGPoint(x: b.midX, y: b.minY)
+    }
+
+    // 화면이 좁아도 바닥 안쪽으로
+    static func spot(_ dx: CGFloat, _ dy: CGFloat) -> CGPoint {
+        let f = floorPlat(), o = origin
+        return CGPoint(x: min(max(o.x + dx, f.minX + 30), f.maxX - 30), y: o.y + dy)
+    }
+
+    // 하늘정원: 상자 계단과 사다리로 구름까지 올라가는 공중 정원. 꼭대기 발판엔 집, 맨 위 구름엔 깃발과 망원경
+    static let skyGarden = MapPreset(name: "하늘정원", objs: [
+        // 왼쪽: 상자 계단 → 꽃 구름
+        (.crate, -528, 0, 0), (.crate, -480, 0, 0), (.crate, -480, 48, 0),
+        (.cloud, -392, 140, 0), (.flowers, -400, 158, 0),
+        // 바닥 정원
+        (.tree, -320, 0, 0), (.ladder, -240, 0, 0), (.pond, -150, 0, 0), (.trampoline, -60, 0, 0),
+        (.wheel, 80, 0, 0), (.campfire, 170, 0, 0), (.mushroom, 230, 0, 0), (.lamp, 300, 0, 0),
+        (.balloon, 380, 0, 0), (.bush, 450, 0, 0), (.portal, 530, 0, 0),
+        // 1층 발판: 사료통, 화분, 그리고 2층으로 가는 사다리
+        (.longPlank, -120, 180, 0), (.flowerPot, -180, 194, 0), (.feeder, -112, 194, 4), (.ladder, -56, 194, 0),
+        // 2층 구름: 포털 (바닥 포털과 이어짐)
+        (.cloud, 64, 370, 0), (.portal, 64, 388, 0),
+        // 3층 발판: 집 자리와 물그릇
+        (.longPlank, 230, 440, 0), (.water, 296, 454, 0),
+        // 꼭대기 구름: 망원경과 깃발
+        (.cloud, 430, 520, 0), (.telescope, 404, 538, 0), (.flag, 462, 538, 0),
+        // 점프 발판 하나 (바닥에서 꼭대기 쪽으로 슝)
+        (.spring, 560, 300, 0),
+    ], houses: [(200, 454)])
+
+    static let builtIn = [skyGarden]
+}
+
+// 프리셋대로 오브젝트를 만듦 (창은 아직 안 띄움)
+func presetObjects(_ p: MapPreset) -> [MapObj] {
+    p.objs.map { MapObj($0.kind, at: MapPreset.spot($0.dx, $0.dy), acorns: $0.acorns) }
+}
+
 // 다람쥐를 우클릭해서 고른 동안: 오브젝트나 집을 누르면 여기로 알려줌
 var commandObj: ((MapObj) -> Void)?
 var commandHouse: ((House) -> Bool)?
@@ -3290,7 +3359,9 @@ final class MapEditor: NSObject {
         reset.bezelStyle = .rounded
         let sweep = NSButton(title: "묻은 도토리 치우기", target: self, action: #selector(sweep))
         sweep.bezelStyle = .rounded
-        let row = NSStackView(views: [done, reset, sweep])
+        let presets = NSButton(title: "프리셋 ▾", target: self, action: #selector(presets(_:)))
+        presets.bezelStyle = .rounded
+        let row = NSStackView(views: [done, presets, reset, sweep])
         row.spacing = 8
         stack.addArrangedSubview(row)
         p.contentView = stack
@@ -3329,6 +3400,11 @@ final class MapEditor: NSObject {
     @objc func finish() { onDone?() }
     @objc func reset() { onReset?() }
     @objc func sweep() { onSweep?() }
+    var presetMenu: (() -> NSMenu)?
+    @objc func presets(_ b: NSButton) {
+        guard let m = presetMenu?() else { return }
+        m.popUp(positioning: nil, at: NSPoint(x: 0, y: b.bounds.height + 4), in: b)
+    }
 }
 
 extension MapEditor: NSWindowDelegate {
@@ -3493,6 +3569,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var stashItem: NSMenuItem!
     var houseItem: NSMenuItem!
     var editItem: NSMenuItem!
+    var presetItem: NSMenuItem!
     var feederTick: CGFloat = 120
     var treeTick: CGFloat = 60
     var petsHeader: NSMenuItem!
@@ -3543,6 +3620,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         houseItem = menu.addItem(withTitle: "다람쥐 집 (꾸미기, 주인 정하기)", action: nil, keyEquivalent: "")
         editItem = menu.addItem(withTitle: "맵 꾸미기 (발판, 사료통…)", action: #selector(toggleEdit), keyEquivalent: "e")
+        presetItem = menu.addItem(withTitle: "맵 프리셋 (하늘정원…)", action: nil, keyEquivalent: "")
+        presetItem.submenu = NSMenu()
         menu.addItem(withTitle: "맵 초기화…", action: #selector(resetMap), keyEquivalent: "").target = self
         menu.addItem(withTitle: "묻어둔 도토리 치우기", action: #selector(clearStash), keyEquivalent: "").target = self
         editItem.target = self
@@ -3567,6 +3646,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         mapEditor.onReset = { [unowned self] in self.resetMap() }
         mapEditor.onSweep = { [unowned self] in self.clearStash() }
+        mapEditor.presetMenu = { [unowned self] in self.presetMenu() }
         mapEditor.onPlaceHouse = { [unowned self] p in
             self.addHouse(at: p)
             mapEditor.select(nil)
@@ -3639,6 +3719,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusLine.title = "배고픔 \(bar(needs.hunger))   기분 \(bar(needs.mood))"
         stashItem.title = "묻어둔 도토리: \(needs.stash.count)개"
         houseItem.submenu = housesMenu()
+        presetItem.submenu = presetMenu()
         for item in menu.items where item.tag >= 1000 { menu.removeItem(item) }
         let at = menu.index(of: petsHeader) + 1
         for (i, pet) in pets.enumerated() {
@@ -4486,6 +4567,140 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         saveMap()
     }
 
+    // MARK: 맵 프리셋
+
+    var userPresets: [MapPreset] {
+        get { (UserDefaults.standard.array(forKey: "mapPresets") as? [[String: Any]] ?? []).compactMap(MapPreset.init(saved:)) }
+        set { UserDefaults.standard.set(newValue.map(\.saved), forKey: "mapPresets") }
+    }
+
+    func presetMenu() -> NSMenu {
+        let menu = NSMenu()
+        func item(_ title: String, _ action: Selector?, _ obj: Any? = nil) -> NSMenuItem {
+            let i = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            i.target = self
+            i.representedObject = obj
+            return i
+        }
+        menu.addItem(item("기본 프리셋", nil))
+        for (i, p) in MapPreset.builtIn.enumerated() {
+            menu.addItem(item("  ☁️ " + p.name, #selector(loadPreset(_:)), ["built", i]))
+        }
+        let mine = userPresets
+        menu.addItem(.separator())
+        menu.addItem(item(mine.isEmpty ? "내 프리셋 (아직 없어요)" : "내 프리셋", nil))
+        for (i, p) in mine.enumerated() {
+            let sub = NSMenu()
+            sub.addItem(item("불러오기", #selector(loadPreset(_:)), ["mine", i]))
+            sub.addItem(item("지금 맵으로 덮어쓰기", #selector(overwritePreset(_:)), i))
+            sub.addItem(item("지우기", #selector(deletePreset(_:)), i))
+            let it = item("  " + p.name + " (\(p.objs.count)개)", nil)
+            it.submenu = sub
+            menu.addItem(it)
+        }
+        menu.addItem(.separator())
+        menu.addItem(item("지금 맵을 프리셋으로 저장…", #selector(savePreset)))
+        return menu
+    }
+
+    // 지금 맵을 화면 바닥 가운데 기준 좌표로
+    func currentPreset(name: String) -> MapPreset {
+        let o = MapPreset.origin
+        return MapPreset(name: name,
+                         objs: mapObjs.map { ($0.kind, $0.pos.x - o.x, $0.pos.y - o.y, $0.acorns) },
+                         houses: houses.map { ($0.x - o.x, $0.y - o.y) })
+    }
+
+    func confirm(_ title: String, _ info: String, _ ok: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = info
+        alert.addButton(withTitle: ok)
+        alert.addButton(withTitle: "취소")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.window.level = .modalPanel
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    @objc func savePreset() {
+        guard !mapObjs.isEmpty else { return pets.first?.sq.say("놓은 게 없어서 저장할 게 없어~", 2) ?? () }
+        let alert = NSAlert()
+        alert.messageText = "프리셋 이름"
+        alert.informativeText = "지금 맵(오브젝트 \(mapObjs.count)개, 집 \(houses.count)채 자리)을 저장해요."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
+        field.stringValue = "내 맵 \(userPresets.count + 1)"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "저장")
+        alert.addButton(withTitle: "취소")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.window.level = .modalPanel
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespaces)
+        var list = userPresets
+        list.append(currentPreset(name: name.isEmpty ? "내 맵 \(list.count + 1)" : name))
+        userPresets = list
+    }
+
+    @objc func overwritePreset(_ item: NSMenuItem) {
+        guard let i = item.representedObject as? Int, i < userPresets.count else { return }
+        var list = userPresets
+        guard confirm("'\(list[i].name)'을(를) 지금 맵으로 덮어쓸까요?", "", "덮어쓰기") else { return }
+        list[i] = currentPreset(name: list[i].name)
+        userPresets = list
+    }
+
+    @objc func deletePreset(_ item: NSMenuItem) {
+        guard let i = item.representedObject as? Int, i < userPresets.count else { return }
+        var list = userPresets
+        guard confirm("'\(list[i].name)' 프리셋을 지울까요?", "지운 프리셋은 되돌릴 수 없어요.", "지우기") else { return }
+        list.remove(at: i)
+        userPresets = list
+    }
+
+    @objc func loadPreset(_ item: NSMenuItem) {
+        guard let a = item.representedObject as? [Any], let kind = a.first as? String, let i = a.last as? Int else { return }
+        let p: MapPreset
+        if kind == "built" { p = MapPreset.builtIn[i] } else {
+            let mine = userPresets
+            guard i < mine.count else { return }
+            p = mine[i]
+        }
+        if !mapObjs.isEmpty {
+            guard confirm("'\(p.name)' 프리셋을 불러올까요?", "지금 놓아 둔 오브젝트 \(mapObjs.count)개는 사라지고 프리셋으로 바뀌어요. 집은 프리셋 자리로 옮겨요.", "불러오기")
+            else { return }
+        }
+        applyPreset(p)
+    }
+
+    func applyPreset(_ p: MapPreset) {
+        if !shown { toggle() }
+        for o in mapObjs { o.window.orderOut(nil) }
+        mapEditor.focus = nil
+        mapObjs = presetObjects(p)
+        for o in mapObjs {
+            o.window.level = petLevel()
+            o.window.ignoresMouseEvents = !editing
+            o.window.orderFrontRegardless()
+            o.bump()
+        }
+        for pet in pets { pet.objGoal = nil; pet.order = nil; pet.goal = nil; pet.sq.target = nil }
+        settleObjects()
+        // 집은 있는 집부터 프리셋 자리로, 모자라면 새로 지음
+        for (i, spot) in p.houses.enumerated() {
+            let at = MapPreset.spot(spot.dx, spot.dy)
+            if i < houses.count {
+                houses[i].x = at.x
+                houses[i].y = at.y
+                houses[i].settle()
+            } else {
+                addHouse(at: at)
+            }
+        }
+        mapChanged()
+        pets.first { !$0.inside }?.sq.say("우와~ \(p.name)이다!", 2.4)
+    }
+
     // 놓은 오브젝트를 전부 치움 (집은 그대로 두고 바닥으로 내려옴)
     @objc func resetMap() {
         guard !mapObjs.isEmpty else { return }
@@ -4783,6 +4998,46 @@ func snapshot(_ dir: String) {
         flat.unlockFocus()
         let rep = NSBitmapImageRep(data: flat.tiffRepresentation!)!
         try? rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
+    }
+    // 하늘정원 프리셋 (화면 1440x900 기준으로 그려 봄)
+    do {
+        mapObjs = presetObjects(.skyGarden)
+        settleObjects()
+        let o = MapPreset.origin
+        let v = OverlayView(frame: NSRect(x: 0, y: 0, width: 1240, height: 680))
+        v.origin = CGPoint(x: o.x - 620, y: o.y - 10)
+        mapEditor.tool = nil
+        mapEditor.focus = mapObjs.first { $0.kind == .cloud && $0.pos.y > o.y + 500 }
+        let img = NSImage(size: v.bounds.size)
+        img.lockFocus()
+        NSGradient(starting: NSColor(red: 0.62, green: 0.82, blue: 0.95, alpha: 1),
+                   ending: NSColor(red: 0.98, green: 0.92, blue: 0.84, alpha: 1))!.draw(in: v.bounds, angle: -90)
+        v.draw(v.bounds)
+        let c = NSGraphicsContext.current!.cgContext
+        c.interpolationQuality = .none
+        for ob in mapObjs {
+            let sp = sprite(ob.pose)
+            c.draw(sp, in: CGRect(x: ob.pos.x - ob.artSize.width / 2 - P - v.origin.x, y: ob.pos.y - P - v.origin.y,
+                                  width: CGFloat(sp.width) * P, height: CGFloat(sp.height) * P))
+        }
+        for spot in MapPreset.skyGarden.houses {
+            let h = House(at: MapPreset.spot(spot.dx, spot.dy))
+            h.owner = "도토리"
+            let hi = h.view.image!
+            c.draw(hi, in: CGRect(x: h.x - CGFloat(hi.width) * P / 2 - v.origin.x, y: h.y - 4 - v.origin.y,
+                                  width: CGFloat(hi.width) * P, height: CGFloat(hi.height) * P))
+        }
+        let topCloud = mapObjs.last { $0.kind == .cloud }!
+        let houseBase = surfaceBelow(x: o.x + 200, y: o.y + 460).id
+        let feederOK = reachable(from: nil, to: mapObjs.first { $0.kind == .feeder }!.base)
+        ("꼭대기 구름까지: \(reachable(from: nil, to: topCloud.id))   집 발판까지: \(reachable(from: nil, to: houseBase))   사료통까지: \(feederOK)" as NSString)
+            .draw(at: CGPoint(x: 10, y: 10), withAttributes: [.font: NSFont.boldSystemFont(ofSize: 13)])
+        img.unlockFocus()
+        mapEditor.focus = nil
+        let rep = NSBitmapImageRep(data: img.tiffRepresentation!)!
+        try? rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "\(dir)/skygarden.png"))
+        mapObjs = []
+        customWins = []
     }
     // 성격별 생김새: 앞모습, 옆모습, 활강
     do {
