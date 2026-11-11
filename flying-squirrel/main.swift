@@ -14,7 +14,7 @@
 //   허락이 필요하면 마우스 쪽으로 와서 손 흔들고, 에러면 털이 쭈뼛, 테스트 통과면 공중제비
 // - 배고픔/기분: 배고프면 시무룩, 기분 좋으면 높이 뛰어 활강. 배부를 때 받은 도토리는 묻어뒀다가 나중에 꺼내 먹음
 // - 밤(23시~6시)엔 집에 들어가 자고, 아침엔 기지개
-// - 다람쥐 근처에서 마우스를 흔들면 쫓아와서 덮침 (메뉴의 '마우스 잡기 놀이'로도 시작), 휴지통에 뭘 버리면 뒤적이러 감
+// - 휴지통에 뭘 버리면 뒤적이러 감
 // - 배터리가 부족하면 기운 없음, 비나 눈이 오면 우산
 // - 여러 마리면 술래잡기, 도토리 쟁탈전, 노래할 땐 화음
 // - 다람쥐마다 이름과 성격(장난꾸러기/먹보/잠꾸러기/겁쟁이/노래쟁이)이 있고, 성격에 맞는 머리 장식을 함
@@ -83,9 +83,16 @@ struct Jump {
     let T: CGFloat
     let surface: Int?       // 내려앉을 발판 (바닥이면 nil)
     var t: CGFloat = 0
+    enum Kind { case arc, climb, warp }
+    var kind: Kind = .arc   // 포물선 점프, 사다리 타기, 포털
+    var to: CGPoint = .zero // 포털이면 나오는 곳
 
     func point(_ t: CGFloat) -> CGPoint {
-        CGPoint(x: from.x + v.dx * t, y: from.y + v.dy * t - gravity * t * t / 2)
+        switch kind {
+        case .arc: return CGPoint(x: from.x + v.dx * t, y: from.y + v.dy * t - gravity * t * t / 2)
+        case .climb: return CGPoint(x: from.x, y: from.y + v.dy * t)
+        case .warp: return to
+        }
     }
 }
 
@@ -556,7 +563,7 @@ enum Personality: String, CaseIterable {
 
 // 멈춰서 하는 행동
 enum Act: Equatable {
-    case none, sing, harmony, think(String), wait(Int), done, cheer, attention, startle, eat, dig, greet
+    case none, sing, harmony, think(String), wait(Int), done, cheer, attention, startle, eat, dig, greet, run
 }
 
 final class Squirrel {
@@ -582,6 +589,7 @@ final class Squirrel {
     var happyTime: CGFloat = 0
     var flipTime: CGFloat = 0   // 공중제비 남은 시간
     var greetTime: CGFloat = 0
+    var runTime: CGFloat = 0    // 쳇바퀴 도는 중
     var nested = false          // 둥지에서 자는 중
     var tired = false           // 배터리가 없거나 너무 배고파서 기운 없음
     var lively: CGFloat = 0.5   // 기분
@@ -623,6 +631,10 @@ final class Squirrel {
         }
         if flipTime > 0 { flipTime -= dt }
         if greetTime > 0 { greetTime -= dt }
+        if runTime > 0 {
+            runTime -= dt
+            if runTime <= 0 { say("헥헥… 운동 끝!", 1.8); needs.cheer(0.08); timer = rnd(1, 2) }
+        }
         speed += (targetSpeed * (tired ? 0.5 : 1) - speed) * min(1, dt * 4)
         if act != .none { sleeping = false; speed = 0 }
 
@@ -884,6 +896,8 @@ final class Squirrel {
         airTime = 0
         sleeping = false
         jump = j
+        if j.kind == .climb { heading = up; pos.x = j.from.x }
+        if j.kind == .warp { say("슝!", 1) }
     }
 
     func hop(_ v: CGVector) {
@@ -1029,6 +1043,10 @@ let palette: [Character: (UInt8, UInt8, UInt8)] = [
     "S": (244, 232, 208),   // 버섯 기둥, 점
     "s": (222, 204, 176),   // 버섯 기둥 그늘
     "P": (204, 112, 72),    // 화분
+    "M": (182, 138, 236),   // 포털
+    "N": (124, 88, 190),    // 포털 그늘
+    "z": (158, 164, 176),   // 쇠
+    "Z": (106, 112, 126),   // 진한 쇠
 ]
 
 // 둥지 (밤에만 나타남, 다람쥐 다리를 가림)
@@ -1469,6 +1487,7 @@ final class PetView: NSView {
     var pose: Pose {
         switch sq.mode {
         case .held: return .glide
+        case .air where sq.jump?.kind == .climb: return .climb(Int(sq.time * 6) % 2 + 1, false)
         case .air where sq.flipTime > 0: return .front(open: true, happy: true)
         case .air: return sq.gliding ? .glide : .side(sq.frame, false)
         case _ where sq.act != .none:
@@ -1478,6 +1497,7 @@ final class PetView: NSView {
             case .wait: return Int(sq.time / 3) % 2 == 0 ? .eat(Int(sq.time * 5) % 2) : .think(0)
             case .eat: return .eat(Int(sq.time * 5) % 2)
             case .dig: return .side(Int(sq.time * 10) % 2 + 1, false)
+            case .run: return .side(Int(sq.time * 12) % 2 + 1, false)
             case .done, .cheer, .greet: return .front(open: true, happy: true)
             case .attention: return .wave(Int(sq.time * 5) % 2)
             case .startle: return .startle
@@ -1837,6 +1857,8 @@ final class HouseView: NSView {
     var sleepers = 0
     var time: CGFloat = 0
     var chimney = CGPoint.zero
+    var label: String?          // 주인 이름표
+    var imageWidth: CGFloat = 0
     var onKnock: (() -> Void)?
     var onMoved: (() -> Void)?
     var menuMaker: (() -> NSMenu)?
@@ -1852,6 +1874,15 @@ final class HouseView: NSView {
         c.clear(bounds)
         c.interpolationQuality = .none
         c.draw(img, in: CGRect(x: 0, y: 0, width: CGFloat(img.width) * P, height: CGFloat(img.height) * P))
+        if let text = label {
+            let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.boldSystemFont(ofSize: 10), .foregroundColor: NSColor.white]
+            let size = (text as NSString).size(withAttributes: attrs)
+            let r = CGRect(x: ((imageWidth - size.width) / 2 - 5).rounded(), y: 2, width: size.width + 10, height: size.height + 2)
+            c.setFillColor(CGColor(red: 0.3, green: 0.22, blue: 0.2, alpha: 0.8))
+            c.addPath(CGPath(roundedRect: r, cornerWidth: 5, cornerHeight: 5, transform: nil))
+            c.fillPath()
+            (text as NSString).draw(at: CGPoint(x: r.minX + 5, y: r.minY + 1), withAttributes: attrs)
+        }
         // 안에서 자고 있으면 Zzz
         guard sleepers > 0 else { return }
         for i in 0..<3 {
@@ -1887,33 +1918,40 @@ final class HouseView: NSView {
 }
 
 final class House {
+    let id: String
     var style: HouseStyle
     var color: Int
     var decor: Set<Decor>
-    var shown: Bool
+    var owner: String? { didSet { view.label = owner; view.needsDisplay = true } }   // 주인 다람쥐 이름 (nil이면 누구나)
     var x: CGFloat               // 집 그림 가운데의 화면 x
+    var y: CGFloat               // 집이 놓인 면의 높이
+    var base: Int?               // 놓인 발판 (바닥이면 nil)
     let window: NSWindow
     let view = HouseView()
+    var onChange: (() -> Void)?
     private var imageSize = CGSize.zero
     private var lit = false
-    private let d = UserDefaults.standard
     // 그림 양옆과 위에 장식 자리
     private let sideRoom = 12, topRoom = 8
 
-    init() {
-        style = HouseStyle(rawValue: d.string(forKey: "houseStyle") ?? "") ?? .cabin
-        color = min(max(d.integer(forKey: "houseColor"), 0), roofColors.count - 1)
-        if let saved = d.array(forKey: "houseDecor") as? [String] {
-            decor = Set(saved.compactMap(Decor.init(rawValue:)))
+    // saved: 저장해 둔 집, at: 새로 짓는 자리
+    init(saved: [String: Any]? = nil, at p: CGPoint? = nil) {
+        let d = saved ?? [:]
+        id = d["id"] as? String ?? UUID().uuidString
+        style = HouseStyle(rawValue: d["style"] as? String ?? "") ?? .cabin
+        color = min(max(d["color"] as? Int ?? 0, 0), roofColors.count - 1)
+        if let list = d["decor"] as? [String] {
+            decor = Set(list.compactMap(Decor.init(rawValue:)))
         } else {
             decor = [.flag, .pot]
         }
-        shown = d.object(forKey: "houseShown") == nil ? true : d.bool(forKey: "houseShown")
+        owner = d["owner"] as? String
         let b = NSScreen.screens[0].visibleFrame
-        var hx = d.object(forKey: "houseX") == nil ? b.minX + 170 : CGFloat(d.double(forKey: "houseX"))
+        var hx = p?.x ?? (d["x"] as? Double).map { CGFloat($0) } ?? b.minX + 170
         // 화면 구성이 바뀌어서 집이 화면 밖이면 다시 데려옴
         if !NSScreen.screens.contains(where: { $0.frame.minX + 60 < hx && hx < $0.frame.maxX - 60 }) { hx = b.minX + 170 }
         x = hx
+        y = p?.y ?? (d["y"] as? Double).map { CGFloat($0) } ?? groundY(at: hx)
 
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 10, height: 10), styleMask: .borderless,
                           backing: .buffered, defer: false)
@@ -1923,14 +1961,31 @@ final class House {
         window.level = petLevel()
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
         window.contentView = view
+        view.label = owner
         view.onMoved = { [unowned self] in
-            // 놓은 자리 아래 바닥에 내려앉음
-            self.x = self.window.frame.minX + self.imageSize.width / 2
-            self.place()
-            self.save()
+            // 놓은 자리 아래 바닥이나 발판에 내려앉음
+            self.x = gridX(self.window.frame.minX + self.imageSize.width / 2)
+            self.y = self.window.frame.minY + 4
+            self.settle()
+            self.onChange?()
         }
+        if saved == nil { settle() }
         rebuild()
-        if shown { window.orderFrontRegardless() }
+    }
+
+    // 지금 자리 바로 아래 면에 내려앉음
+    func settle() {
+        let s = surfaceBelow(x: x, y: y + 6)
+        y = s.y
+        base = s.id
+        place()
+    }
+
+    var saved: [String: Any] {
+        var d: [String: Any] = ["id": id, "style": style.rawValue, "color": color, "decor": decor.map(\.rawValue),
+                                "x": Double(x), "y": Double(y)]
+        if let o = owner { d["owner"] = o }
+        return d
     }
 
     // 문 앞 (다람쥐가 걸어갈 곳)
@@ -1938,16 +1993,8 @@ final class House {
         x - imageSize.width / 2 + CGFloat(sideRoom + style.door + 1) * P
     }
 
-    func save() {
-        d.set(style.rawValue, forKey: "houseStyle")
-        d.set(color, forKey: "houseColor")
-        d.set(decor.map(\.rawValue), forKey: "houseDecor")
-        d.set(shown, forKey: "houseShown")
-        d.set(Double(x), forKey: "houseX")
-    }
-
     func place() {
-        window.setFrameOrigin(NSPoint(x: (x - imageSize.width / 2).rounded(), y: groundY(at: x) - 4))
+        window.setFrameOrigin(NSPoint(x: (x - imageSize.width / 2).rounded(), y: y - 4))
     }
 
     // 고른 모양, 색, 장식으로 그림을 다시 만듦
@@ -1978,6 +2025,7 @@ final class House {
         let img = image(outlined(pad(g, t: 1, l: 1, r: 1, b: 1)), extra)
         imageSize = CGSize(width: CGFloat(img.width) * P, height: CGFloat(img.height) * P)
         view.image = img
+        view.imageWidth = imageSize.width
         view.chimney = CGPoint(x: imageSize.width / 2 + 30, y: imageSize.height - CGFloat(topRoom) * P)
         // 위쪽은 Zzz 자리
         let size = NSSize(width: imageSize.width, height: imageSize.height + 44)
@@ -2011,15 +2059,22 @@ final class House {
 // MARK: - 맵 꾸미기: 발판과 기능 오브젝트
 
 enum ObjKind: String, CaseIterable {
-    case plank, longPlank, feeder, trampoline, cushion, flowerPot, lamp
+    case plank, longPlank, cloud, crate, ladder, portal
+    case feeder, water, trampoline, cannon, wheel, flowerPot, lamp
 
     var title: String {
         switch self {
         case .plank: return "발판"
         case .longPlank: return "긴 발판"
+        case .cloud: return "구름"
+        case .crate: return "상자"
+        case .ladder: return "사다리"
+        case .portal: return "포털"
         case .feeder: return "사료통"
+        case .water: return "물그릇"
         case .trampoline: return "트램펄린"
-        case .cushion: return "방석"
+        case .cannon: return "대포"
+        case .wheel: return "쳇바퀴"
         case .flowerPot: return "화분"
         case .lamp: return "가로등"
         }
@@ -2027,21 +2082,48 @@ enum ObjKind: String, CaseIterable {
 
     var hint: String {
         switch self {
-        case .plank, .longPlank: return "다람쥐가 뛰어 올라가 걸어 다녀요"
+        case .plank, .longPlank: return "공중 어디에나 놓는 발판. 뛰어 올라가 걸어 다녀요"
+        case .cloud: return "하늘에 띄우는 폭신한 발판"
+        case .crate: return "쌓을 수 있는 상자. 계단이나 탑을 만들어요"
+        case .ladder: return "타고 올라가는 사다리. 사다리 위에 또 쌓으면 스카이 타워!"
+        case .portal: return "두 개를 놓으면 한쪽으로 들어가 다른 쪽으로 나와요 (여러 개면 차례로)"
         case .feeder: return "도토리가 2분마다 하나씩 쌓이고, 배고프면 와서 먹어요"
+        case .water: return "와서 물을 마시면 기분이 좋아져요"
         case .trampoline: return "밟으면 높이 튀어 올라 활강해요"
-        case .cushion: return "와서 낮잠을 자요"
+        case .cannon: return "들어가면 펑! 하고 멀리 날아가요"
+        case .wheel: return "올라타서 달리기 운동을 해요"
         case .flowerPot, .lamp: return "꾸미기용 (가로등은 밤에 켜져요)"
         }
     }
 
-    var isPlatform: Bool { self == .plank || self == .longPlank }
+    // 위에 올라설 수 있음
+    var isPlatform: Bool { [.plank, .longPlank, .cloud, .crate, .ladder].contains(self) }
+    // 공중에 띄워 놓음 (아니면 아래 면에 내려앉음)
+    var floats: Bool { [.plank, .longPlank, .cloud].contains(self) }
 
-    // n: 사료통이면 쌓인 도토리 수, 가로등이면 불 켜짐(1)
+    // n: 사료통이면 쌓인 도토리 수, 가로등이면 불 켜짐(1), 쳇바퀴면 도는 프레임
     func art(_ n: Int) -> [String] {
         switch self {
         case .plank: return plankArt(24)
         case .longPlank: return plankArt(40)
+        case .cloud:
+            return ["....hhhh......hhhhh.........",
+                    "..hhhhhhhh..hhhhhhhhh..hhh..",
+                    ".hhhhhhhhhhhhhhhhhhhhhhhhhh.",
+                    "hhhhhhhhhhhhhhhhhhhhhhhhhhhh",
+                    ".GGhhhhhhhGGGhhhhhhhGGGhhGG.",
+                    "...GGGGGGG...GGGGGGG...GG..."]
+        case .crate:
+            return (0..<12).map { y in
+                String((0..<12).map { x -> Character in
+                    y == 0 || y == 11 || x == 0 || x == 11 || x == y || x == 11 - y ? "V" : "W"
+                })
+            }
+        case .ladder:
+            return (0..<48).map { $0 % 4 == 1 ? "VWWWWWWWV" : "V.......V" }
+        case .portal:
+            return ["...MMMM...", "..MNNNNM..", ".MNccccNM.", "MNccCCccNM", "MNcCccCcNM", "MNcCcCCcNM",
+                    "MNcCccccNM", "MNcCcCccNM", "MNccCCccNM", ".MNccccNM.", "..MNNNNM..", "...MMMM..."]
         case .feeder:
             var g = feederBody.map(Array.init)
             // 아래층부터 도토리가 쌓임
@@ -2050,14 +2132,41 @@ enum ObjKind: String, CaseIterable {
                 g[y][x] = "b"; g[y][x + 1] = "l"
             }
             return g.map { String($0) }
+        case .water: return [".cccccccccc.", "zcChcccCcccz", ".zzzzzzzzzz.", "..ZZZZZZZZ.."]
         case .trampoline: return ["cccccccccccccccc", "CCCCCCCCCCCCCCCC", ".o............o.", "oo............oo"]
-        case .cushion: return ["..pppppppppp..", ".pppppppppppp.", "pppppnppppnppp", ".nnnnnnnnnnnn."]
+        case .cannon:
+            return ["..rRRRRr..", "..rrrrrr..", "..zzzzzz..", "..zZZZZz..", "..zZZZZz..", ".zzZZZZzz.",
+                    "VV.zzzz.VV", "VV......VV"]
+        case .wheel:
+            var g: [String] = (0..<14).map { y in
+                String((0..<14).map { x -> Character in
+                    let dx = CGFloat(x) - 6.5, dy = CGFloat(y) - 6.5, d = hypot(dx, dy)
+                    if d > 5.6 && d < 7.1 { return "z" }
+                    guard d <= 5.6 else { return "." }
+                    if d < 1.2 { return "Z" }
+                    let spoke = n % 2 == 0 ? (abs(dx) < 1 || abs(dy) < 1) : abs(abs(dx) - abs(dy)) < 1
+                    return spoke ? "s" : "."
+                })
+            }
+            g.append("VV..........VV")
+            return g
         case .flowerPot: return [".p...j.", "pjp.jaj", ".pL..jL", "..LLLL.", ".PPPPP.", ".PPPPP.", "..PPP.."]
         case .lamp:
             let light = n == 1 ? "j" : "S"
             return ["ooooo", "o" + String(repeating: light, count: 3) + "o", "o" + String(repeating: light, count: 3) + "o",
                     "ooooo"] + Array(repeating: "..o..", count: 10) + [".ooo."]
         }
+    }
+
+    var size: CGSize {
+        let a = art(0)
+        return CGSize(width: CGFloat(a.map(\.count).max() ?? 0) * P, height: CGFloat(a.count) * P)
+    }
+
+    // pos(아래 가운데)에 놓였을 때 올라서는 면
+    func plat(id: Int?, at p: CGPoint) -> Plat {
+        let s = size, pad: CGFloat = self == .ladder ? 8 : 0
+        return Plat(id: id, minX: p.x - s.width / 2 - pad, maxX: p.x + s.width / 2 + pad, y: p.y + s.height)
     }
 }
 
@@ -2116,7 +2225,7 @@ final class ObjView: NSView {
     override func mouseUp(with e: NSEvent) {
         guard let obj = obj, mapEditor.focus === obj else { return }
         mapEditor.focus = nil
-        obj.pos = snapped(obj.kind, obj.pos)
+        obj.pos = snapped(obj.kind, obj.pos).p
         obj.place()
         mapEditor.onChange?()
     }
@@ -2129,9 +2238,11 @@ final class MapObj {
     private static var nextId = -1
     let id: Int
     let kind: ObjKind
-    var pos: CGPoint            // 아래 가운데 (발판이면 밑면, 나머지는 놓인 바닥)
+    var pos: CGPoint            // 아래 가운데
+    var base: Int?              // 내려앉은 면 (바닥이면 nil)
     var acorns: Int { didSet { if acorns != oldValue { redraw() } } }
     var lit = false { didSet { if lit != oldValue { redraw() } } }
+    var spin = 0 { didSet { if spin != oldValue { redraw() } } }
     let window: NSWindow
     let view = ObjView()
 
@@ -2154,15 +2265,28 @@ final class MapObj {
         redraw()
     }
 
-    var pose: Pose { .obj(kind, kind == .feeder ? acorns : kind == .lamp ? (lit ? 1 : 0) : 0) }
-
-    // 테두리를 뺀 그림 크기
-    var artSize: CGSize {
-        let a = kind.art(0)
-        return CGSize(width: CGFloat(a.map(\.count).max() ?? 0) * P, height: CGFloat(a.count) * P)
+    var pose: Pose {
+        switch kind {
+        case .feeder: return .obj(kind, acorns)
+        case .lamp: return .obj(kind, lit ? 1 : 0)
+        case .wheel: return .obj(kind, spin)
+        default: return .obj(kind, 0)
+        }
     }
 
+    // 테두리를 뺀 그림 크기
+    var artSize: CGSize { kind.size }
+
     var frame: CGRect { CGRect(x: pos.x - artSize.width / 2, y: pos.y, width: artSize.width, height: artSize.height) }
+
+    var plat: Plat { kind.plat(id: id, at: pos) }
+
+    // 떨어지던 다람쥐가 걸리는 자리 (사다리는 맨 위 칸만)
+    var landing: CGRect {
+        let p = plat
+        if kind == .ladder { return CGRect(x: p.minX, y: p.y - 8, width: p.maxX - p.minX, height: 8) }
+        return frame
+    }
 
     func redraw() {
         let img = sprite(pose)
@@ -2181,6 +2305,21 @@ final class MapObj {
 // 놓은 오브젝트들 (발판은 customWins로 창 목록에 끼워 넣음)
 var mapObjs: [MapObj] = []
 
+// 아래 있는 것부터 차례로 내려앉혀서 상자 위 상자, 사다리 위 사다리도 제자리를 찾음
+func settleObjects() {
+    for o in mapObjs.sorted(by: { $0.pos.y < $1.pos.y }) where !o.kind.floats {
+        let s = snapped(o.kind, o.pos, except: o.id)
+        o.pos = s.p
+        o.base = s.base
+        o.place()
+    }
+    rebuildCustomWins()
+}
+
+func rebuildCustomWins() {
+    customWins = mapObjs.filter { $0.kind.isPlatform }.map { Win(id: $0.id, frame: $0.landing, kind: .custom) }
+}
+
 // 다람쥐가 서 있을 수 있는 면: 주 화면 바닥(id nil)과 발판들
 struct Plat {
     let id: Int?
@@ -2193,10 +2332,11 @@ func floorPlat() -> Plat {
 }
 
 func plats(_ extra: [Plat] = []) -> [Plat] {
-    [floorPlat()] + mapObjs.filter { $0.kind.isPlatform }.map {
-        Plat(id: $0.id, minX: $0.frame.minX, maxX: $0.frame.maxX, y: $0.frame.maxY)
-    } + extra
+    [floorPlat()] + mapObjs.filter { $0.kind.isPlatform }.map(\.plat) + extra
 }
+
+// 맵 꾸미기에서 아직 놓지 않은 사다리 (id 0): 어디에 서 있는지
+var ghostLadder: (x: CGFloat, base: Int?)?
 
 // A에서 B로 한 번에 뛸 수 있으면 도약 지점과 점프 (B가 너무 높거나 멀면 nil)
 func edge(_ a: Plat, _ b: Plat) -> (take: CGFloat, jump: Jump)? {
@@ -2213,7 +2353,31 @@ func edge(_ a: Plat, _ b: Plat) -> (take: CGFloat, jump: Jump)? {
     return nil
 }
 
-// a에서 b까지 발판을 건너건너 가는 길의 첫 점프 (못 가면 nil)
+// A에서 B로 가는 한 걸음: 사다리 타기, 점프, 포털
+func hop(_ a: Plat, _ b: Plat) -> (take: CGFloat, jump: Jump)? {
+    // B가 A 위에 세운 사다리면 타고 올라감
+    var ladder: (x: CGFloat, base: Int?)?
+    if b.id == 0 { ladder = ghostLadder }
+    else if let l = mapObjs.first(where: { $0.id == b.id && $0.kind == .ladder }) { ladder = (l.pos.x, l.base) }
+    if let l = ladder, l.base == a.id, b.y > a.y, a.minX <= l.x, l.x <= a.maxX {
+        let from = CGPoint(x: l.x, y: a.y)
+        return (l.x, Jump(from: from, v: CGVector(dx: 0, dy: 130), T: (b.y - a.y) / 130, surface: b.id, kind: .climb))
+    }
+    if let e = edge(a, b) { return e }
+    // A에 있는 포털의 다음 포털이 B에 있으면 순간이동
+    let portals = mapObjs.filter { $0.kind == .portal }
+    guard portals.count > 1 else { return nil }
+    for (i, p) in portals.enumerated() where p.base == a.id {
+        let q = portals[(i + 1) % portals.count]
+        if q.base == b.id {
+            return (p.pos.x, Jump(from: CGPoint(x: p.pos.x, y: a.y), v: .zero, T: 0.01, surface: b.id, kind: .warp,
+                                  to: CGPoint(x: q.pos.x, y: b.y)))
+        }
+    }
+    return nil
+}
+
+// a에서 b까지 발판을 건너건너 가는 길의 첫 걸음 (못 가면 nil)
 func firstHop(from a: Int?, to b: Int?, extra: [Plat] = []) -> (take: CGFloat, jump: Jump)? {
     let ps = plats(extra)
     guard let s = ps.firstIndex(where: { $0.id == a }), let t = ps.firstIndex(where: { $0.id == b }), s != t
@@ -2224,7 +2388,7 @@ func firstHop(from a: Int?, to b: Int?, extra: [Plat] = []) -> (take: CGFloat, j
     while !queue.isEmpty {
         let u = queue.removeFirst()
         if u == t { break }
-        for v in ps.indices where !seen.contains(v) && edge(ps[u], ps[v]) != nil {
+        for v in ps.indices where !seen.contains(v) && hop(ps[u], ps[v]) != nil {
             seen.insert(v)
             prev[v] = u
             queue.append(v)
@@ -2233,7 +2397,7 @@ func firstHop(from a: Int?, to b: Int?, extra: [Plat] = []) -> (take: CGFloat, j
     guard seen.contains(t) else { return nil }
     var v = t
     while prev[v] != s { v = prev[v]! }
-    return edge(ps[s], ps[v])
+    return hop(ps[s], ps[v])
 }
 
 func reachable(from a: Int?, to b: Int?, extra: [Plat] = []) -> Bool {
@@ -2241,29 +2405,37 @@ func reachable(from a: Int?, to b: Int?, extra: [Plat] = []) -> Bool {
 }
 
 // x 아래로 가장 가까운 면 (발판 위면 그 발판, 아니면 바닥)
-func surfaceBelow(x: CGFloat, y: CGFloat) -> (y: CGFloat, id: Int?) {
+func surfaceBelow(x: CGFloat, y: CGFloat, except: Int? = nil) -> (y: CGFloat, id: Int?) {
     var best = (y: groundY(at: x), id: Int?.none)
-    for p in plats().dropFirst() where p.minX + 4 <= x && x <= p.maxX - 4 && p.y <= y + 6 && p.y > best.y {
+    for p in plats().dropFirst() where p.id != except && p.minX + 4 <= x && x <= p.maxX - 4 && p.y <= y + 6 && p.y > best.y {
         best = (p.y, p.id)
     }
     return best
 }
 
 // 오브젝트가 놓인 면
-func objPlat(_ o: MapObj) -> Int? {
-    if o.kind.isPlatform { return o.id }
-    return surfaceBelow(x: o.pos.x, y: o.pos.y).id
+func objPlat(_ o: MapObj) -> Int? { o.kind.isPlatform ? o.id : o.base }
+
+// 격자에 맞추기 (바닥에서부터 16pt 칸)
+var gridSnap = UserDefaults.standard.object(forKey: "gridSnap") == nil ? true : UserDefaults.standard.bool(forKey: "gridSnap")
+let gridSize: CGFloat = 16
+func gridX(_ x: CGFloat) -> CGFloat { gridSnap ? (x / gridSize).rounded() * gridSize : x.rounded() }
+func gridY(_ y: CGFloat, at x: CGFloat) -> CGFloat {
+    let g = groundY(at: x)
+    return gridSnap ? g + ((y - g) / gridSize).rounded() * gridSize : y.rounded()
 }
 
-// 맵 꾸미기에서 놓을 자리: 발판은 마우스 자리 그대로, 나머지는 아래 면에 내려놓음
-func snapped(_ k: ObjKind, _ p: CGPoint) -> CGPoint {
-    if k.isPlatform {
-        return CGPoint(x: p.x.rounded(), y: max(p.y, groundY(at: p.x) + 40).rounded())
+// 맵 꾸미기에서 놓을 자리: 뜨는 발판은 마우스 자리 그대로, 나머지는 아래 면(바닥, 발판, 상자, 사다리 위)에 내려놓음
+func snapped(_ k: ObjKind, _ p: CGPoint, except: Int? = nil) -> (p: CGPoint, base: Int?) {
+    let x = gridX(p.x)
+    if k.floats {
+        return (CGPoint(x: x, y: max(gridY(p.y, at: x), groundY(at: x) + 32)), nil)
     }
-    return CGPoint(x: p.x.rounded(), y: surfaceBelow(x: p.x, y: p.y + 4).y)
+    let s = surfaceBelow(x: x, y: p.y + 4, except: except)
+    return (CGPoint(x: x, y: s.y), s.id)
 }
 
-// MARK: - 맵 꾸미기 화면 (팔레트 + 잔상 미리보기)
+// MARK: - 맵 꾸미기 화면 (그림 팔레트 + 격자 + 잔상 미리보기)
 
 final class OverlayView: NSView {
     var origin = CGPoint.zero       // 이 뷰 왼쪽 아래의 화면 좌표
@@ -2273,8 +2445,12 @@ final class OverlayView: NSView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseDown(with e: NSEvent) {
-        guard let k = mapEditor.tool else { return }
-        mapEditor.onPlace?(k, snapped(k, NSEvent.mouseLocation))
+        let m = NSEvent.mouseLocation
+        if mapEditor.houseTool {
+            mapEditor.onPlaceHouse?(CGPoint(x: gridX(m.x), y: m.y))
+        } else if let k = mapEditor.tool {
+            mapEditor.onPlace?(k, snapped(k, m).p)
+        }
     }
     override func rightMouseDown(with e: NSEvent) { mapEditor.select(nil) }
 
@@ -2285,19 +2461,32 @@ final class OverlayView: NSView {
         c.fill(bounds)
         c.interpolationQuality = .none
         let m = mouse ?? NSEvent.mouseLocation
+        if gridSnap { drawGrid(c) }
 
         // 지금 보고 있는 면: 끌고 있는 발판, 아니면 놓으려는 발판 유령
         var focus: Plat?
         var label: (CGPoint, Bool)?
+        ghostLadder = nil
         if let o = mapEditor.focus {
             if o.kind.isPlatform {
-                focus = Plat(id: o.id, minX: o.frame.minX, maxX: o.frame.maxX, y: o.frame.maxY)
+                focus = o.plat
+                if o.kind == .ladder { o.base = surfaceBelow(x: o.pos.x, y: o.pos.y + 4, except: o.id).id }
             } else {
                 let s = surfaceBelow(x: o.pos.x, y: o.pos.y + 4)
                 label = (CGPoint(x: o.pos.x, y: o.frame.maxY + 8), reachable(from: nil, to: s.id))
             }
+        } else if mapEditor.houseTool {
+            let x = gridX(m.x), s = surfaceBelow(x: x, y: m.y + 4)
+            if let img = mapEditor.houseGhost {
+                let w = CGFloat(img.width) * P, h = CGFloat(img.height) * P
+                c.saveGState()
+                c.setAlpha(0.55)
+                c.draw(img, in: CGRect(x: x - origin.x - w / 2, y: s.y - origin.y - P, width: w, height: h))
+                c.restoreGState()
+                label = (CGPoint(x: x, y: s.y + h + 4), reachable(from: nil, to: s.id))
+            }
         } else if let k = mapEditor.tool {
-            let p = snapped(k, m)
+            let (p, base) = snapped(k, m)
             let img = sprite(.obj(k, k == .feeder ? 3 : 0))
             let w = CGFloat(img.width) * P, h = CGFloat(img.height) * P
             c.saveGState()
@@ -2305,22 +2494,21 @@ final class OverlayView: NSView {
             c.draw(img, in: CGRect(x: p.x - origin.x - w / 2, y: p.y - origin.y - P, width: w, height: h))
             c.restoreGState()
             if k.isPlatform {
-                let size = CGFloat(k.art(0)[0].count) * P
-                focus = Plat(id: 0, minX: p.x - size / 2, maxX: p.x + size / 2, y: p.y + 3 * P)
+                focus = k.plat(id: 0, at: p)
+                if k == .ladder { ghostLadder = (p.x, base) }
             } else {
-                let s = surfaceBelow(x: p.x, y: p.y + 4)
-                label = (CGPoint(x: p.x, y: p.y + h + 4), reachable(from: nil, to: s.id))
+                label = (CGPoint(x: p.x, y: p.y + h + 4), reachable(from: nil, to: base))
             }
         }
 
         if let f = focus {
             let extra = f.id == 0 ? [f] : []
-            // 근처 면들과 서로 뛰어갈 수 있는지 잔상으로 보여줌
+            // 근처 면들과 서로 오갈 수 있는지 잔상으로 보여줌
             for o in plats() where o.id != f.id {
                 let gap = max(o.minX - f.maxX, f.minX - o.maxX, 0)
                 guard gap < 420, abs(o.y - f.y) < 420 else { continue }
                 // 초록: 여기로 올 수 있는 길, 파랑: 여기서 내려가는 길, 빨강: 여기로 못 옴
-                let come = edge(o, f), leave = edge(f, o)
+                let come = hop(o, f), leave = hop(f, o)
                 if let e = come { drawArc(c, e.jump, ok: true) }
                 if let e = leave, come == nil || abs(o.y - f.y) > 30 { drawArc(c, e.jump, ok: false) }
                 if come == nil {
@@ -2338,8 +2526,42 @@ final class OverlayView: NSView {
         }
     }
 
-    // 점프 궤적을 따라 다람쥐 잔상
+    // 바닥에서부터 16pt 칸 (네 칸마다 진하게)
+    func drawGrid(_ c: CGContext) {
+        let ground = floorPlat().y - origin.y
+        c.saveGState()
+        c.setLineWidth(1)
+        var i = 0
+        var x = (origin.x / gridSize).rounded(.up) * gridSize - origin.x
+        while x < bounds.maxX {
+            let major = Int(((x + origin.x) / gridSize).rounded()) % 4 == 0
+            c.setStrokeColor(CGColor(red: 0.15, green: 0.3, blue: 0.5, alpha: major ? 0.16 : 0.06))
+            c.move(to: CGPoint(x: x + 0.5, y: ground)); c.addLine(to: CGPoint(x: x + 0.5, y: bounds.maxY)); c.strokePath()
+            x += gridSize
+        }
+        var y = ground
+        while y < bounds.maxY {
+            c.setStrokeColor(CGColor(red: 0.15, green: 0.3, blue: 0.5, alpha: i % 4 == 0 ? 0.16 : 0.06))
+            c.move(to: CGPoint(x: 0, y: y + 0.5)); c.addLine(to: CGPoint(x: bounds.maxX, y: y + 0.5)); c.strokePath()
+            y += gridSize; i += 1
+        }
+        c.restoreGState()
+    }
+
+    // 점프 궤적(사다리면 타고 오르는 길)을 따라 다람쥐 잔상
     func drawArc(_ c: CGContext, _ j: Jump, ok: Bool) {
+        if j.kind == .warp {
+            // 포털은 보라색 점선
+            c.saveGState()
+            c.setStrokeColor(CGColor(red: 0.6, green: 0.4, blue: 0.9, alpha: 0.85))
+            c.setLineWidth(2)
+            c.setLineDash(phase: 0, lengths: [2, 5])
+            c.move(to: CGPoint(x: j.from.x - origin.x, y: j.from.y - origin.y + 24))
+            c.addLine(to: CGPoint(x: j.to.x - origin.x, y: j.to.y - origin.y + 24))
+            c.strokePath()
+            c.restoreGState()
+            return
+        }
         let color = ok ? CGColor(red: 0.2, green: 0.62, blue: 0.3, alpha: 0.85)
             : CGColor(red: 0.3, green: 0.5, blue: 0.85, alpha: 0.7)
         c.saveGState()
@@ -2353,7 +2575,7 @@ final class OverlayView: NSView {
         }
         c.strokePath()
         c.restoreGState()
-        let img = sprite(.side(1, false))
+        let img = sprite(j.kind == .climb ? .climb(1, false) : .side(1, false))
         let w = CGFloat(img.width) * P * 0.55, h = CGFloat(img.height) * P * 0.55
         let n = 4
         for i in 1...n {
@@ -2394,19 +2616,61 @@ final class OverlayView: NSView {
     }
 }
 
+// 기본 오두막 그림 (팔레트 아이콘과 놓기 전 유령)
+func houseIcon() -> CGImage {
+    let roof = roofColors[0].rgb
+    let dark = (UInt8(Double(roof.0) * 0.75), UInt8(Double(roof.1) * 0.75), UInt8(Double(roof.2) * 0.75))
+    let g: Grid = HouseStyle.cabin.art.map(Array.init)
+    return image(outlined(pad(g, t: 1, l: 1, r: 1, b: 1)), ["X": roof, "Y": dark])
+}
+
+// 팔레트의 한 칸: 오브젝트 그림과 이름
+final class Tile: NSView {
+    var title = ""
+    var image: NSImage?
+    var tileTag = 0
+    var selected = false { didSet { needsDisplay = true } }
+    var onClick: (() -> Void)?
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with e: NSEvent) { onClick?() }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let r = bounds.insetBy(dx: 1, dy: 1)
+        let box = NSBezierPath(roundedRect: r, xRadius: 8, yRadius: 8)
+        (selected ? NSColor.controlAccentColor.withAlphaComponent(0.28) : NSColor.gray.withAlphaComponent(0.12)).setFill()
+        box.fill()
+        (selected ? NSColor.controlAccentColor : NSColor.gray.withAlphaComponent(0.35)).setStroke()
+        box.lineWidth = selected ? 2 : 1
+        box.stroke()
+        if let img = image {
+            let s = img.size
+            img.draw(in: NSRect(x: ((bounds.width - s.width) / 2).rounded(), y: (20 + (44 - s.height) / 2).rounded(),
+                                width: s.width, height: s.height))
+        }
+        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 10, weight: selected ? .bold : .regular),
+                                                    .foregroundColor: NSColor.labelColor]
+        let size = (title as NSString).size(withAttributes: attrs)
+        (title as NSString).draw(at: NSPoint(x: ((bounds.width - size.width) / 2).rounded(), y: 5), withAttributes: attrs)
+    }
+}
+
 final class MapEditor: NSObject {
     var tool: ObjKind?
+    var houseTool = false
     var erasing = false
     var focus: MapObj?
     var onPlace: ((ObjKind, CGPoint) -> Void)?
+    var onPlaceHouse: ((CGPoint) -> Void)?
     var onErase: ((MapObj) -> Void)?
     var onChange: (() -> Void)?
     var onDone: (() -> Void)?
-    private var panel: NSPanel?
+    lazy var houseGhost: CGImage? = houseIcon()
+    var panel: NSPanel?
     private var overlay: NSWindow?
     let overlayView = OverlayView()
-    private var buttons: [NSButton] = []
+    private var buttons: [Tile] = []
     private var hintLabel: NSTextField!
+    static let houseTag = 98, eraserTag = 99
 
     func show() {
         if panel == nil { build() }
@@ -2423,14 +2687,43 @@ final class MapEditor: NSObject {
         panel?.orderOut(nil)
         overlay?.orderOut(nil)
         tool = nil
+        houseTool = false
         erasing = false
         focus = nil
+        ghostLadder = nil
     }
 
     func tick() { overlayView.needsDisplay = true }
 
-    private func build() {
-        let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 210, height: 420),
+    // 그림이 들어간 칸 하나
+    private func tile(_ title: String, _ image: NSImage?, tag: Int, tip: String) -> Tile {
+        let t = Tile(frame: NSRect(x: 0, y: 0, width: 76, height: 70))
+        t.title = title
+        t.image = image
+        t.tileTag = tag
+        t.toolTip = tip
+        t.onClick = { [unowned self, unowned t] in self.select(t.selected ? nil : t.tileTag) }
+        t.translatesAutoresizingMaskIntoConstraints = false
+        t.widthAnchor.constraint(equalToConstant: 76).isActive = true
+        t.heightAnchor.constraint(equalToConstant: 70).isActive = true
+        buttons.append(t)
+        return t
+    }
+
+    // 픽셀 그림을 칸에 맞는 크기로 (정수 배율로만 줄여서 또렷하게)
+    private func icon(_ img: CGImage) -> NSImage {
+        let k = min(40 / CGFloat(img.width), 40 / CGFloat(img.height), 3)
+        let size = NSSize(width: (CGFloat(img.width) * k).rounded(), height: (CGFloat(img.height) * k).rounded())
+        let out = NSImage(size: size)
+        out.lockFocus()
+        NSGraphicsContext.current?.cgContext.interpolationQuality = k >= 1 ? .none : .high
+        NSGraphicsContext.current?.cgContext.draw(img, in: CGRect(origin: .zero, size: size))
+        out.unlockFocus()
+        return out
+    }
+
+    func build() {
+        let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 270, height: 520),
                         styleMask: [.titled, .closable, .utilityWindow, .nonactivatingPanel],
                         backing: .buffered, defer: false)
         p.title = "맵 꾸미기"
@@ -2442,34 +2735,44 @@ final class MapEditor: NSObject {
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 6
+        stack.spacing = 8
         stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
-        for (i, k) in ObjKind.allCases.enumerated() {
-            let b = NSButton(title: k.title, target: self, action: #selector(pick(_:)))
-            b.setButtonType(.pushOnPushOff)
-            b.bezelStyle = .rounded
-            b.tag = i
-            buttons.append(b)
-            stack.addArrangedSubview(b)
+
+        var tiles: [Tile] = ObjKind.allCases.enumerated().map { i, k in
+            tile(k.title, icon(sprite(.obj(k, k == .feeder ? 4 : 0))), tag: i, tip: k.hint)
         }
-        let eraser = NSButton(title: "지우개", target: self, action: #selector(pick(_:)))
-        eraser.setButtonType(.pushOnPushOff)
-        eraser.bezelStyle = .rounded
-        eraser.tag = 99
-        buttons.append(eraser)
-        stack.addArrangedSubview(eraser)
+        tiles.append(tile("집", icon(houseIcon()), tag: MapEditor.houseTag, tip: "다람쥐 집을 한 채 더 지어요. 발판 위에도 올릴 수 있어요"))
+        tiles.append(tile("지우개", NSImage(systemSymbolName: "eraser", accessibilityDescription: nil),
+                          tag: MapEditor.eraserTag, tip: "누른 오브젝트를 지워요"))
+        var rows: [[NSView]] = []
+        for i in stride(from: 0, to: tiles.count, by: 3) {
+            var row: [NSView] = Array(tiles[i..<min(i + 3, tiles.count)])
+            while row.count < 3 { row.append(NSGridCell.emptyContentView) }
+            rows.append(row)
+        }
+        let grid = NSGridView(views: rows)
+        grid.rowSpacing = 6
+        grid.columnSpacing = 6
+        stack.addArrangedSubview(grid)
+
+        let snap = NSButton(checkboxWithTitle: "격자에 맞추기", target: self, action: #selector(toggleSnap(_:)))
+        snap.state = gridSnap ? .on : .off
+        stack.addArrangedSubview(snap)
         hintLabel = NSTextField(wrappingLabelWithString: "")
         hintLabel.font = .systemFont(ofSize: 11)
         hintLabel.textColor = .secondaryLabelColor
-        hintLabel.preferredMaxLayoutWidth = 186
+        hintLabel.preferredMaxLayoutWidth = 240
+        hintLabel.translatesAutoresizingMaskIntoConstraints = false
+        hintLabel.heightAnchor.constraint(equalToConstant: 84).isActive = true
         stack.addArrangedSubview(hintLabel)
         let done = NSButton(title: "다 꾸몄어요", target: self, action: #selector(finish))
         done.bezelStyle = .rounded
         done.keyEquivalent = "\r"
         stack.addArrangedSubview(done)
         p.contentView = stack
+        p.setContentSize(stack.fittingSize)
         let vf = NSScreen.screens[0].visibleFrame
-        p.setFrameTopLeftPoint(NSPoint(x: vf.maxX - 240, y: vf.maxY - 40))
+        p.setFrameTopLeftPoint(NSPoint(x: vf.maxX - p.frame.width - 30, y: vf.maxY - 40))
         panel = p
 
         let o = NSWindow(contentRect: NSScreen.screens[0].frame, styleMask: .borderless, backing: .buffered, defer: false)
@@ -2482,18 +2785,21 @@ final class MapEditor: NSObject {
         overlay = o
     }
 
-    @objc func pick(_ b: NSButton) {
-        select(b.state == .on ? b.tag : nil)
+    @objc func toggleSnap(_ b: NSButton) {
+        gridSnap = b.state == .on
+        UserDefaults.standard.set(gridSnap, forKey: "gridSnap")
     }
 
-    // 고른 도구 (99는 지우개, nil이면 옮기기만)
+    // 고른 도구 (98은 집, 99는 지우개, nil이면 옮기기만)
     func select(_ tag: Int?) {
         tool = tag.flatMap { $0 < ObjKind.allCases.count ? ObjKind.allCases[$0] : nil }
-        erasing = tag == 99
-        for b in buttons { b.state = b.tag == tag ? .on : .off }
-        hintLabel?.stringValue = tool.map { "\($0.hint)\n바탕화면을 누르면 놓여요." }
-            ?? (erasing ? "지울 오브젝트를 누르세요." :
-                "오브젝트를 골라 놓고, 놓은 건 끌어서 옮겨요. 우클릭하면 지워요.\n초록 잔상: 여기로 뛰어올 수 있는 길\n파란 잔상: 여기서 내려가는 길\n빨간 점선: 너무 높거나 멀어서 못 오는 사이")
+        houseTool = tag == MapEditor.houseTag
+        erasing = tag == MapEditor.eraserTag
+        for b in buttons { b.selected = b.tileTag == tag }
+        hintLabel?.stringValue = tool.map { "\($0.title): \($0.hint)\n바탕화면을 누르면 놓여요." }
+            ?? (houseTool ? "집: 누른 자리 아래(바닥이나 발판 위)에 집을 지어요.\n집을 우클릭하면 모양, 주인을 정하거나 허물 수 있어요." :
+                erasing ? "지울 오브젝트를 누르세요. (집은 우클릭 → 이 집 허물기)" :
+                "그림을 골라 바탕화면에 놓고, 놓은 건 끌어서 옮겨요. 우클릭하면 지워요.\n초록 잔상: 여기로 올 수 있는 길\n파란 잔상: 여기서 내려가는 길\n빨간 점선: 너무 높거나 멀어서 못 오는 사이")
     }
 
     @objc func finish() { onDone?() }
@@ -2510,7 +2816,7 @@ let mapEditor = MapEditor()
 
 // 다람쥐가 가려는 곳
 enum Goal: Equatable {
-    case acorn(ObjectIdentifier), mouse, approach, tag, flee, stash(CGFloat), trash, home, visit
+    case acorn(ObjectIdentifier), approach, tag, flee, stash(CGFloat), trash, home, visit
     case feeder(Int), obj(Int)
 }
 // 도착해서 하는 일
@@ -2525,8 +2831,8 @@ final class Pet {
     var goal: Goal?
     var chore: Chore?
     var claimed: ObjectIdentifier?  // "내꺼야!" 하고 외친 도토리
-    var chaseTime: CGFloat = 0
     var inside = false              // 집 안에 들어가 있음
+    weak var house: House?          // 들어가 있는 집
     var insideTime: CGFloat = 0     // 낮에 잠깐 들른 거면 남은 시간
     var wantsVisit = false
     var visitCheck = rnd(90, 240)
@@ -2608,27 +2914,7 @@ final class Pet {
     private var rub: CGFloat = 0
     private var lastMouse = CGPoint.zero
 
-    // 다람쥐 근처에서 마우스를 좌우로 흔들면 쫓아가서 덮침 (겁쟁이는 도망)
     private func watchMouse(_ m: CGPoint, moved: CGFloat, dist: CGFloat, _ dt: CGFloat) {
-        mouseSpeed += (moved / max(dt, 0.001) - mouseSpeed) * min(1, dt * 6)
-        if chaseTime > 0 {
-            chaseTime -= dt
-            calm = mouseSpeed < 120 ? calm + dt : 0
-            if calm > 2 {
-                chaseTime = 0
-                sq.say(sq.personality == .shy ? "휴… 갔나?" : "어디 갔지?")
-            }
-            if chaseTime <= 0 { chaseCool = 25 }
-        } else {
-            chaseCool -= dt
-            // 장난꾸러기는 조금만 흔들어도 달려듦
-            let need: CGFloat = sq.personality == .playful ? 1300 : 2000
-            let free = sq.act == .none || sq.act == .sing || sq.act == .harmony
-            if chaseCool <= 0, mouseSpeed > need, dist > 60, dist < 260, free, sq.mode == .floor || sq.mode == .wall,
-               sq.target == nil, !sq.nested, !view.dragging {
-                startChase()
-            }
-        }
         // 둥지에서 자는데 아직 컴퓨터를 하고 있으면 잔소리
         if sq.nested && sq.sleeping && moved > 2 {
             nag -= dt
@@ -2639,19 +2925,11 @@ final class Pet {
         }
     }
 
-    func startChase() {
-        chaseTime = 6
-        calm = 0
-        sq.sleeping = false
-        sq.say(sq.personality == .shy ? "히익! 무서워!" : "잡을 거야!", 1.2)
-    }
-
-    func endChase() { chaseTime = 0; chaseCool = 25 }
-
     // 우선순위: 먹기 > 일하기 > 어디 가는 중 > Claude 반응 > 아침 인사 > 노래
     func currentAct() -> Act {
         if sq.eatTime > 0 { return .eat }
         if sq.workTime > 0 { return .dig }
+        if sq.runTime > 0 { return sq.mode == .floor ? .run : .none }
         guard sq.mode == .floor || sq.mode == .wall, sq.target == nil, !sq.nested else { return .none }
         if claudeReact {
             switch claude.state {
@@ -2693,7 +2971,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var musicPoll: CGFloat = 0
     var acorns: [Acorn] = []
     var mounds: [Prop] = []
-    var house: House!
+    var houses: [House] = []
     var play: (chaser: Pet, runner: Pet, time: CGFloat)?
     var playCheck: CGFloat = 20
     var eatenItem: NSMenuItem!
@@ -2729,11 +3007,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         weatherItem.state = weatherReact ? .on : .off
         menu.addItem(.separator())
         menu.addItem(withTitle: "도토리 주기", action: #selector(giveAcorn), keyEquivalent: "a").target = self
-        menu.addItem(withTitle: "마우스 잡기 놀이", action: #selector(playChase), keyEquivalent: "m").target = self
         eatenItem = menu.addItem(withTitle: "지금까지 먹은 도토리: \(eaten)개", action: nil, keyEquivalent: "")
         stashItem = menu.addItem(withTitle: "", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
-        houseItem = menu.addItem(withTitle: "다람쥐 집 꾸미기", action: nil, keyEquivalent: "")
+        houseItem = menu.addItem(withTitle: "다람쥐 집 (꾸미기, 주인 정하기)", action: nil, keyEquivalent: "")
         editItem = menu.addItem(withTitle: "맵 꾸미기 (발판, 사료통…)", action: #selector(toggleEdit), keyEquivalent: "e")
         editItem.target = self
         menu.addItem(.separator())
@@ -2745,9 +3022,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
 
         // 집을 먼저 만들어서 다람쥐들이 그 앞을 지나다니게
-        house = House()
-        house.view.menuMaker = { [unowned self] in self.houseMenu() }
-        house.view.onKnock = { [unowned self] in self.knock() }
+        loadHouses()
         mounds = needs.stash.map { Prop(.mound, at: CGPoint(x: $0, y: groundY(at: $0))) }
         loadMap()
         mapEditor.onPlace = { [unowned self] k, p in
@@ -2755,6 +3030,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             mapObjs.append(o)
             o.window.orderFrontRegardless()
             self.mapChanged()
+        }
+        mapEditor.onPlaceHouse = { [unowned self] p in
+            self.addHouse(at: p)
+            mapEditor.select(nil)
         }
         mapEditor.onErase = { [unowned self] o in
             mapObjs.removeAll { $0 === o }
@@ -2819,7 +3098,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         statusLine.title = "배고픔 \(bar(needs.hunger))   기분 \(bar(needs.mood))"
         stashItem.title = "묻어둔 도토리: \(needs.stash.count)개"
-        houseItem.submenu = houseMenu()
+        houseItem.submenu = housesMenu()
         for item in menu.items where item.tag >= 1000 { menu.removeItem(item) }
         let at = menu.index(of: petsHeader) + 1
         for (i, pet) in pets.enumerated() {
@@ -2852,15 +3131,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: 집
 
-    func houseMenu() -> NSMenu {
+    // 이 다람쥐가 돌아갈 집: 자기 이름이 붙은 집, 없으면 주인 없는 집
+    func home(for pet: Pet) -> House? {
+        houses.first { $0.owner == pet.sq.name } ?? houses.first { $0.owner == nil }
+    }
+
+    func loadHouses() {
+        let d = UserDefaults.standard
+        if let list = d.array(forKey: "houses") as? [[String: Any]] {
+            for h in list { wire(House(saved: h)) }
+        } else if d.object(forKey: "houseShown") == nil || d.bool(forKey: "houseShown") {
+            // 예전에 쓰던 집 한 채를 그대로 가져옴
+            var old: [String: Any] = ["color": d.integer(forKey: "houseColor")]
+            if let s = d.string(forKey: "houseStyle") { old["style"] = s }
+            if let dc = d.array(forKey: "houseDecor") as? [String] { old["decor"] = dc }
+            if d.object(forKey: "houseX") != nil { old["x"] = d.double(forKey: "houseX") }
+            wire(House(saved: old))
+        }
+    }
+
+    func saveHouses() { UserDefaults.standard.set(houses.map(\.saved), forKey: "houses") }
+
+    func wire(_ h: House) {
+        h.view.menuMaker = { [unowned self, unowned h] in self.houseMenu(h) }
+        h.view.onKnock = { [unowned self, unowned h] in self.knock(h) }
+        h.onChange = { [unowned self] in self.saveHouses() }
+        houses.append(h)
+        if shown { h.window.orderFrontRegardless() }
+    }
+
+    func addHouse(at p: CGPoint?) {
+        let b = NSScreen.screens[0].visibleFrame
+        let spot = p ?? CGPoint(x: min(b.minX + 170 + CGFloat(houses.count) * 190, b.maxX - 170), y: b.minY)
+        let h = House(at: spot)
+        h.color = houses.count % roofColors.count
+        h.rebuild()
+        wire(h)
+        h.window.level = petLevel()
+        saveHouses()
+    }
+
+    @objc func buildHouse() {
+        if !shown { toggle() }
+        addHouse(at: nil)
+    }
+
+    // 메뉴바의 집 목록
+    func housesMenu() -> NSMenu {
         let menu = NSMenu()
-        func add(_ title: String, _ action: Selector?, tag: Int = 0, on: Bool = false) {
+        for (i, h) in houses.enumerated() {
+            let item = menu.addItem(withTitle: "\(i + 1)번 집: \(h.style.title) (\(h.owner.map { "\($0)네 집" } ?? "누구나"))",
+                                    action: nil, keyEquivalent: "")
+            item.submenu = houseMenu(h)
+        }
+        if !houses.isEmpty { menu.addItem(.separator()) }
+        menu.addItem(withTitle: "집 한 채 더 짓기", action: #selector(buildHouse), keyEquivalent: "").target = self
+        return menu
+    }
+
+    // 집 한 채를 꾸미는 메뉴 (집을 우클릭해도 나옴)
+    func houseMenu(_ house: House) -> NSMenu {
+        let menu = NSMenu()
+        func add(_ title: String, _ action: Selector?, tag: Int = 0, on: Bool = false, name: String? = nil) {
             let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
             item.target = self
             item.tag = tag
             item.state = on ? .on : .off
+            item.representedObject = [house, name as Any]
         }
-        add("집 보이기", #selector(toggleHouse), on: house.shown)
+        add("이 집 주인", nil)
+        add("  누구나", #selector(setHouseOwner(_:)), on: house.owner == nil)
+        for p in pets {
+            add("  " + p.sq.name, #selector(setHouseOwner(_:)), on: house.owner == p.sq.name, name: p.sq.name)
+        }
         menu.addItem(.separator())
         add("집 모양", nil)
         for (i, s) in HouseStyle.allCases.enumerated() {
@@ -2877,52 +3220,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             add("  " + dc.title, #selector(toggleDecor(_:)), tag: i, on: house.decor.contains(dc))
         }
         menu.addItem(.separator())
-        add("집은 끌어서 옮기고, 누르면 똑똑 노크해요", nil)
+        add("이 집 허물기", #selector(removeHouse(_:)))
+        add("끌어서 옮기고(발판 위에도 돼요), 누르면 똑똑 노크해요", nil)
         return menu
     }
 
-    @objc func toggleHouse() {
-        house.shown.toggle()
-        if house.shown && shown { house.window.orderFrontRegardless() } else { house.window.orderOut(nil) }
-        // 집이 없어지면 안에 있던 다람쥐들은 밖으로
-        if !house.shown { for p in pets where p.inside { leaveHome(p, say: "어? 집이 없어졌어!") } }
-        house.save()
+    private func house(of item: NSMenuItem) -> House? { (item.representedObject as? [Any])?.first as? House }
+
+    @objc func setHouseOwner(_ item: NSMenuItem) {
+        guard let house = house(of: item) else { return }
+        let name = (item.representedObject as? [Any])?.last as? String
+        // 한 다람쥐에 집 하나씩: 다른 집 주인이었으면 거긴 비워 줌
+        if let n = name { for h in houses where h !== house && h.owner == n { h.owner = nil } }
+        house.owner = name
+        // 이제 자기 집이 아닌 데 들어가 있던 다람쥐는 나옴
+        for p in pets where p.inside && p.house === house && home(for: p) !== house { leaveHome(p, say: "여긴 내 집이 아니네!") }
+        if let p = pets.first(where: { $0.sq.name == name }), !p.inside { p.sq.say("여기가 내 집이야!", 2) }
+        saveHouses()
+    }
+
+    @objc func removeHouse(_ item: NSMenuItem) {
+        guard let house = house(of: item) else { return }
+        for p in pets where p.inside && p.house === house { leaveHome(p, say: "어? 집이 없어졌어!") }
+        for p in pets { p.sq.nested = false }
+        house.window.orderOut(nil)
+        houses.removeAll { $0 === house }
+        saveHouses()
     }
 
     @objc func setHouseStyle(_ item: NSMenuItem) {
+        guard let house = house(of: item) else { return }
         house.style = HouseStyle.allCases[item.tag]
         // 둥지는 들어가는 집이 아니라 올라앉는 곳
-        for p in pets where p.inside { leaveHome(p, say: "집이 바뀌었네!") }
+        for p in pets where p.inside && p.house === house { leaveHome(p, say: "집이 바뀌었네!") }
         for p in pets { p.sq.nested = false }
         house.rebuild()
-        house.save()
+        saveHouses()
     }
 
     @objc func setHouseColor(_ item: NSMenuItem) {
+        guard let house = house(of: item) else { return }
         house.color = item.tag
         house.rebuild()
-        house.save()
+        saveHouses()
     }
 
     @objc func toggleDecor(_ item: NSMenuItem) {
+        guard let house = house(of: item) else { return }
         let dc = Decor.allCases[item.tag]
         if house.decor.contains(dc) { house.decor.remove(dc) } else { house.decor.insert(dc) }
         house.rebuild()
-        house.save()
+        saveHouses()
     }
 
-    // 똑똑: 안에 있으면 나오고, 없으면 가까운 다람쥐가 대답
-    func knock() {
-        if let p = pets.first(where: { $0.inside }) {
+    // 똑똑: 안에 있으면 나오고, 없으면 주인(없으면 가까운 다람쥐)이 대답
+    func knock(_ house: House) {
+        if let p = pets.first(where: { $0.inside && $0.house === house }) {
             leaveHome(p, say: "누구세요?")
             p.visitCheck = rnd(120, 300)
-        } else if let p = pets.min(by: { abs($0.sq.pos.x - house.x) < abs($1.sq.pos.x - house.x) }) {
+        } else if let p = pets.first(where: { !$0.inside && $0.sq.name == house.owner })
+                    ?? pets.filter({ !$0.inside }).min(by: { abs($0.sq.pos.x - house.x) < abs($1.sq.pos.x - house.x) }) {
             p.sq.say(["우리 집 예쁘지?", "지금 아무도 없어~", "똑똑!"].randomElement()!, 2)
         }
     }
 
-    func enterHome(_ pet: Pet, for time: CGFloat) {
+    func enterHome(_ pet: Pet, _ house: House, for time: CGFloat) {
         pet.inside = true
+        pet.house = house
         pet.insideTime = time
         pet.wantsVisit = false
         pet.goal = nil
@@ -2934,21 +3298,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard pet.inside else { return }
         pet.inside = false
         let sq = pet.sq
-        sq.pos.x = house.doorX
-        sq.land(on: nil, ground: groundY(at: house.doorX))
+        if let h = pet.house ?? home(for: pet) {
+            sq.pos.x = h.doorX
+            sq.land(on: h.base, ground: h.y)
+        }
+        pet.house = nil
         sq.dir = Bool.random() ? 1 : -1
         if let line = line { sq.say(line, 2) }
         if shown { pet.window.orderFrontRegardless() }
     }
 
     func updateHouse(_ dt: CGFloat, restack: Bool) {
-        guard house.shown else { return }
-        let home = pets.filter { $0.inside }
-        house.tick(dt, sleepers: home.filter { $0.insideTime <= 0 }.count, anyoneHome: !home.isEmpty)
-        // 둥지는 다람쥐보다 앞에 둬서 다리를 가림
-        if house.style == .nest && restack && pets.contains(where: { $0.sq.nested }) {
-            house.window.orderFrontRegardless()
+        for house in houses {
+            let home = pets.filter { $0.inside && $0.house === house }
+            house.tick(dt, sleepers: home.filter { $0.insideTime <= 0 }.count, anyoneHome: !home.isEmpty)
+            // 둥지는 다람쥐보다 앞에 둬서 다리를 가림
+            if house.style == .nest && restack && pets.contains(where: { $0.sq.nested }) {
+                house.window.orderFrontRegardless()
+            }
         }
+        // 집이 놓인 발판이 없어졌거나 주인이 떠났으면 정리
+        for p in pets where p.inside && !houses.contains(where: { $0 === p.house }) { leaveHome(p, say: nil) }
     }
 
     // 바탕화면 층 <-> 모든 창 위
@@ -2956,9 +3326,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         onDesktop.toggle()
         item.state = onDesktop ? .on : .off
         refreshWindows()
-        house.window.level = petLevel()
-        if shown && house.shown { house.window.orderFrontRegardless() }
-        for w in mapObjs.map(\.window) + pets.filter({ !$0.inside }).map(\.window) + props {
+        for w in houses.map(\.window) + mapObjs.map(\.window) + pets.filter({ !$0.inside }).map(\.window) + props {
             w.level = petLevel()
             if shown { w.orderFrontRegardless() }
         }
@@ -2987,20 +3355,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             acorns.append(a)
             return
         }
-        let from = pet.inside ? CGPoint(x: house.doorX, y: groundY(at: house.doorX) + 100) : pet.sq.pos
+        let from = pet.inside ? CGPoint(x: pet.house?.doorX ?? pet.sq.pos.x, y: (pet.house?.y ?? 0) + 100) : pet.sq.pos
         let b = screenBounds(for: from)
         let x = min(max(from.x + rnd(-260, 260), b.minX + 90), b.maxX - 90)
         acorns.append(Acorn(at: CGPoint(x: x, y: b.maxY - 40)))
-    }
-
-    // 메뉴에서 바로 시작하는 마우스 잡기
-    @objc func playChase() {
-        if !shown { toggle() }
-        for p in pets {
-            if p.inside { leaveHome(p, say: nil) }
-            p.sq.nested = false
-            p.startChase()
-        }
     }
 
     // 다람쥐마다 지금 어디로 갈지 정하고, 도착하면 할 일을 시작
@@ -3032,7 +3390,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             // 낮에 가끔 집에 들름
             let idle = sq.mode == .floor && sq.act == .none && !sq.sleeping
-            if house.shown && house.style != .nest && !sq.bedtime && !pet.wantsVisit && idle {
+            if let h = home(for: pet), h.style != .nest, !sq.bedtime, !pet.wantsVisit, idle {
                 pet.visitCheck -= dt
                 if pet.visitCheck <= 0 {
                     pet.visitCheck = rnd(120, 300)
@@ -3060,10 +3418,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let a = freeAcorns.min(by: { abs($0.pos.x - sq.pos.x) < abs($1.pos.x - sq.pos.x) }) {
                 // 먹보는 도토리를 보면 전속력
                 goal = .acorn(ObjectIdentifier(a)); x = a.pos.x; rush = sq.personality == .glutton ? 150 : 95
-            } else if pet.chaseTime > 0 {
-                // 겁쟁이는 마우스한테서 도망
-                goal = .mouse; rush = sq.personality == .playful ? 200 : 170
-                x = shy ? sq.pos.x + (sq.pos.x >= m.x ? 260 : -260) : m.x
             } else if claudeReact, claude.state == .attention, sq.mode == .floor, !sq.nested, abs(m.x - sq.pos.x) > 140 {
                 // Claude가 허락을 기다리면 마우스 쪽으로 다가가서 손 흔들기
                 goal = .approach; x = m.x; rush = 110
@@ -3078,14 +3432,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } else if world.trashed && i == 0 {
                 // 휴지통은 보통 Dock 오른쪽 끝
                 goal = .trash; x = b.maxX - 120; rush = 110
-            } else if house.shown && sq.bedtime && !sq.nested {
+            } else if let h = home(for: pet), sq.bedtime, !sq.nested, pet.navFail <= 0 {
+                // 자기 집으로 (발판 위에 있으면 길을 찾아 올라감)
                 goal = .home; rush = 60
-                x = house.style == .nest ? house.x + [0, -26, 26, -13, 13][i % 5] : house.doorX
-            } else if house.shown && pet.wantsVisit {
-                goal = .visit; x = house.doorX; rush = 70
+                nav = (h.style == .nest ? h.x + [0, -26, 26, -13, 13][i % 5] : h.doorX, h.base)
+            } else if let h = home(for: pet), pet.wantsVisit, pet.navFail <= 0 {
+                goal = .visit; rush = 70
+                nav = (h.doorX, h.base)
             } else if let id = pet.objGoal, let o = mapObjs.first(where: { $0.id == id }) {
                 goal = .obj(id); rush = 85
-                if o.kind.isPlatform && pet.objX == nil { pet.objX = rnd(o.frame.minX + 20, o.frame.maxX - 20) }
+                if o.kind.isPlatform && pet.objX == nil {
+                    let pl = o.plat, half = max(0, (pl.maxX - pl.minX) / 2 - 20)
+                    pet.objX = o.pos.x + rnd(-half, half)
+                }
                 nav = o.kind.isPlatform ? (pet.objX!, o.id) : (o.pos.x, objPlat(o))
             } else {
                 pet.objGoal = nil
@@ -3101,13 +3460,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 case .approach?: sq.say("불렀어?")
                 case .stash?: sq.say("숨겨둔 도토리 먹어야지~", 2)
                 case .trash?: sq.say("방금 뭐 버렸어?", 2)
-                case .home?: sq.say(house.style == .nest ? "졸려… 둥지 가야지" : "졸려… 집에 가야지", 2)
+                case .home?: sq.say(home(for: pet)?.style == .nest ? "졸려… 둥지 가야지" : "졸려… 집에 가야지", 2)
                 case .visit?: sq.say("집에 잠깐 다녀올게~", 2)
                 case .feeder?: sq.say("사료통에 밥 먹으러~", 2)
                 case .obj(let id)?:
                     switch mapObjs.first(where: { $0.id == id })?.kind {
                     case .trampoline?: sq.say("트램펄린 타야지!", 1.6)
-                    case .cushion?: sq.say("방석에서 쉴래~", 1.6)
+                    case .cannon?: sq.say("대포 타볼까!", 1.6)
+                    case .wheel?: sq.say("운동하러 가야지!", 1.6)
+                    case .water?: sq.say("목말라~", 1.6)
+                    case .portal?: sq.say("포털 타고 슝~", 1.6)
+                    case .ladder?: sq.say("사다리 올라가 볼까?", 1.6)
                     default: sq.say("저기 올라가 볼까?", 1.6)
                     }
                 default: break
@@ -3122,6 +3485,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     // 맵이 바뀌어서 못 가게 됐으면 포기
                     pet.goal = nil
                     pet.objGoal = nil
+                    pet.wantsVisit = false
                     pet.navFail = 40
                     sq.target = nil
                     sq.say("저기는 못 가겠어…", 1.6)
@@ -3157,12 +3521,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     sq.startEating()
                     eaten += 1
                 }
-            case .mouse:
-                if !shy && dx < 40 && m.y < sq.feet + 160 {
-                    pet.endChase()
-                    pet.goal = nil
-                    sq.pounce(toward: m.x)
-                }
             case .tag:
                 if let p = play, abs(p.runner.sq.pos.x - sq.pos.x) < 30 {
                     sq.say("잡았다!", 1.4)
@@ -3185,21 +3543,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     pet.chore = .trash
                     sq.startWork(2.2, "뒤적뒤적…")
                 }
-            case .home:
-                guard dx < 8 else { break }
-                if house.style == .nest {
-                    pet.goal = nil
-                    sq.target = nil
-                    sq.nested = true
-                    sq.sleeping = true
-                    sq.targetSpeed = 0
-                    sq.timer = rnd(20, 40)
-                } else {
-                    enterHome(pet, for: 0)
-                }
-            case .visit:
-                if dx < 8 { enterHome(pet, for: rnd(15, 40)) }
-            case .approach, .flee, .feeder, .obj:
+            case .approach, .flee, .feeder, .obj, .home, .visit:
                 break
             }
         }
@@ -3242,6 +3586,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pet.goal = nil
         sq.target = nil
         switch g {
+        case .home:
+            guard let h = home(for: pet) else { return }
+            if h.style == .nest {
+                sq.nested = true
+                sq.sleeping = true
+                sq.targetSpeed = 0
+                sq.timer = rnd(20, 40)
+            } else {
+                enterHome(pet, h, for: 0)
+            }
+        case .visit:
+            if let h = home(for: pet) { enterHome(pet, h, for: rnd(15, 40)) }
         case .feeder(let id):
             guard let f = mapObjs.first(where: { $0.id == id }), f.acorns > 0 else { return sq.say("비었네…", 1.4) }
             f.acorns -= 1
@@ -3250,13 +3606,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .obj(let id):
             pet.objGoal = nil
             switch mapObjs.first(where: { $0.id == id })?.kind {
-            case .cushion?:
-                sq.sleeping = true
-                sq.targetSpeed = 0
-                sq.timer = rnd(15, 30)
-                sq.say("푹신하다~", 1.6)
-            case .plank?, .longPlank?:
-                if rnd(0, 1) < 0.5 { sq.say(["높다~!", "여기 좋다!", "경치 좋네~"].randomElement()!, 1.6) }
+            case .wheel?:
+                sq.runTime = rnd(4, 7)
+                sq.say("달려라 달려~!", 1.6)
+            case .water?:
+                sq.say("꿀꺽꿀꺽~ 시원해!", 2)
+                sq.happyTime = 2
+                needs.cheer(0.06)
+            case .portal?:
+                // 다음 포털로 순간이동
+                let portals = mapObjs.filter { $0.kind == .portal }
+                if let i = portals.firstIndex(where: { $0.id == id }), portals.count > 1 {
+                    let q = portals[(i + 1) % portals.count]
+                    let y = q.pos.y
+                    sq.leap(Jump(from: CGPoint(x: sq.pos.x, y: sq.feet), v: .zero, T: 0.01, surface: q.base, kind: .warp,
+                                 to: CGPoint(x: q.pos.x, y: y)))
+                    needs.cheer(0.02)
+                } else {
+                    sq.say("짝이 없네…", 1.6)
+                }
+            case .plank?, .longPlank?, .cloud?, .crate?, .ladder?:
+                if rnd(0, 1) < 0.5 { sq.say(["높다~!", "여기 좋다!", "경치 좋네~", "야호~!"].randomElement()!, 1.6) }
             default:
                 break
             }
@@ -3281,12 +3651,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let here = (sq.surface ?? 0) < 0 ? sq.surface : nil
         let ok = mapObjs.filter { $0.kind != .feeder && $0.kind != .flowerPot && $0.kind != .lamp }
             .filter { o in o.id != here && reachable(from: here, to: objPlat(o)) }
-        let tramps = ok.filter { $0.kind == .trampoline }, cushions = ok.filter { $0.kind == .cushion }
-        let planks = ok.filter { $0.kind.isPlatform }
+        let fun = ok.filter { [.trampoline, .cannon, .wheel, .portal].contains($0.kind) }
+        let high = ok.filter { $0.kind.isPlatform }
         switch sq.personality {
-        case .playful: return (tramps + tramps + planks).randomElement()?.id
-        case .sleepy: return (cushions.randomElement() ?? planks.randomElement())?.id
-        default: return rnd(0, 1) < 0.6 ? ok.randomElement()?.id : nil
+        case .playful: return (fun + fun + high).randomElement()?.id
+        case .sleepy: return rnd(0, 1) < 0.4 ? ok.randomElement()?.id : nil
+        default: return rnd(0, 1) < 0.7 ? ok.randomElement()?.id : nil
         }
     }
 
@@ -3294,8 +3664,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func bounce(_ pet: Pet) {
         let sq = pet.sq
         guard sq.mode == .floor, pet.bounceCool <= 0, (sq.surface ?? -1) < 0 || sq.surface == nil else { return }
-        for t in mapObjs where t.kind == .trampoline && objPlat(t) == sq.surface && abs(t.pos.x - sq.pos.x) < 18 {
+        for t in mapObjs where (t.kind == .trampoline || t.kind == .cannon) && objPlat(t) == sq.surface
+            && abs(t.pos.x - sq.pos.x) < 18 {
             pet.bounceCool = 1.2
+            if t.kind == .cannon {
+                // 화면 넓은 쪽으로 펑
+                if case .obj(let id)? = pet.goal, id == t.id { pet.goal = nil; pet.objGoal = nil }
+                let b = screenBounds(for: sq.pos)
+                sq.target = nil
+                sq.hop(CGVector(dx: sq.pos.x < b.midX ? 520 : -520, dy: 1350))
+                sq.say("펑~!!", 1.2)
+                needs.cheer(0.03)
+                return
+            }
             if case .obj(let id)? = pet.goal, id == t.id { pet.goal = nil; pet.objGoal = nil }
             sq.target = nil
             sq.hop(CGVector(dx: sq.dir * 120, dy: 1150))
@@ -3314,16 +3695,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             saveMap()
         }
         for l in mapObjs where l.kind == .lamp { l.lit = world.night }
+        for w in mapObjs where w.kind == .wheel {
+            let on = pets.contains { $0.sq.runTime > 0 && abs($0.sq.pos.x - w.pos.x) < 20 }
+            w.spin = on ? Int(CACurrentMediaTime() * 10) % 2 : 0
+        }
         if editing { mapEditor.tick() }
     }
 
     func mapChanged() {
         // 발판이 사라지거나 옮겨지면 그 위의 오브젝트는 아래로 떨어짐
-        customWins = mapObjs.filter { $0.kind.isPlatform }.map { Win(id: $0.id, frame: $0.frame, kind: .custom) }
-        for o in mapObjs where !o.kind.isPlatform {
-            o.pos = snapped(o.kind, o.pos)
-            o.place()
-        }
+        settleObjects()
+        for h in houses { h.settle() }
+        saveHouses()
         refreshWindows()
         saveMap()
     }
@@ -3349,12 +3732,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !shown { toggle() }
         editing.toggle()
         editItem.state = editing ? .on : .off
-        let all = [house.window] + mapObjs.map(\.window) + props + pets.filter { !$0.inside }.map(\.window)
+        let all = houses.map(\.window) + mapObjs.map(\.window) + props + pets.filter { !$0.inside }.map(\.window)
         for w in all {
             w.level = petLevel()
-            if w.isVisible || w !== house.window { w.orderFrontRegardless() }
+            w.orderFrontRegardless()
         }
-        if !house.shown { house.window.orderOut(nil) }
         for o in mapObjs { o.window.ignoresMouseEvents = !editing }
         if editing {
             mapEditor.show()
@@ -3424,7 +3806,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         shown.toggle()
         toggleItem.title = shown ? "다람쥐 숨기기" : "다람쥐 보이기"
         statusItem.button?.appearsDisabled = !shown
-        if shown && house.shown { house.window.orderFrontRegardless() } else { house.window.orderOut(nil) }
+        for h in houses { shown ? h.window.orderFrontRegardless() : h.window.orderOut(nil) }
         for p in pets where !p.inside { shown ? p.window.orderFrontRegardless() : p.window.orderOut(nil) }
         for w in props + mapObjs.map(\.window) { shown ? w.orderFrontRegardless() : w.orderOut(nil) }
         if !shown && editing { toggleEdit() }
@@ -3506,7 +3888,7 @@ func snapshot(_ dir: String) {
                MapObj(.longPlank, at: CGPoint(x: base.x + 420, y: base.y + 200)),
                MapObj(.trampoline, at: CGPoint(x: base.x + 640, y: base.y))]
     mapObjs.append(MapObj(.feeder, at: CGPoint(x: base.x + 420, y: base.y + 212), acorns: 5))
-    customWins = mapObjs.filter { $0.kind.isPlatform }.map { Win(id: $0.id, frame: $0.frame, kind: .custom) }
+    rebuildCustomWins()
     for (name, tool, m) in [("map-ok", ObjKind.plank, CGPoint(x: base.x + 260, y: base.y + 230)),
                             ("map-high", ObjKind.plank, CGPoint(x: base.x + 760, y: base.y + 330))] {
         let v = OverlayView(frame: NSRect(x: 0, y: 0, width: 960, height: 520))
@@ -3527,6 +3909,56 @@ func snapshot(_ dir: String) {
         bg.unlockFocus()
         let rep = NSBitmapImageRep(data: bg.tiffRepresentation!)!
         try? rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
+    }
+    // 스카이 타워: 상자 계단, 사다리 위 사다리, 구름, 포털, 그 위의 집
+    mapObjs = [MapObj(.crate, at: CGPoint(x: base.x + 96, y: base.y)), MapObj(.crate, at: CGPoint(x: base.x + 144, y: base.y)),
+               MapObj(.crate, at: CGPoint(x: base.x + 144, y: base.y + 48)),
+               MapObj(.ladder, at: CGPoint(x: base.x + 320, y: base.y)),
+               MapObj(.longPlank, at: CGPoint(x: base.x + 448, y: base.y + 192)),
+               MapObj(.ladder, at: CGPoint(x: base.x + 512, y: base.y + 204)),
+               MapObj(.cloud, at: CGPoint(x: base.x + 688, y: base.y + 368)),
+               MapObj(.portal, at: CGPoint(x: base.x + 720, y: base.y + 400)),
+               MapObj(.portal, at: CGPoint(x: base.x + 16, y: base.y)),
+               MapObj(.water, at: CGPoint(x: base.x + 416, y: base.y + 210)),
+               MapObj(.wheel, at: CGPoint(x: base.x + 640, y: base.y)), MapObj(.cannon, at: CGPoint(x: base.x + 760, y: base.y))]
+    settleObjects()
+    do {
+        let v = OverlayView(frame: NSRect(x: 0, y: 0, width: 980, height: 640))
+        v.origin = CGPoint(x: base.x - 100, y: base.y - 20)
+        v.mouse = CGPoint(x: base.x + 880, y: base.y + 320)
+        mapEditor.tool = .cloud
+        let bg = NSImage(size: v.bounds.size)
+        bg.lockFocus()
+        NSColor(white: 0.93, alpha: 1).setFill()
+        v.bounds.fill()
+        v.draw(v.bounds)
+        let c = NSGraphicsContext.current!.cgContext
+        c.interpolationQuality = .none
+        let hs = House(at: CGPoint(x: base.x + 470, y: base.y + 260))
+        hs.owner = "도토리"
+        for o in mapObjs {
+            let img = sprite(o.pose)
+            c.draw(img, in: CGRect(x: o.pos.x - o.artSize.width / 2 - P - v.origin.x,
+                                   y: o.pos.y - P - v.origin.y, width: CGFloat(img.width) * P, height: CGFloat(img.height) * P))
+        }
+        let hi = hs.view.image!
+        c.draw(hi, in: CGRect(x: hs.x - CGFloat(hi.width) * P / 2 - v.origin.x, y: hs.y - 4 - v.origin.y,
+                              width: CGFloat(hi.width) * P, height: CGFloat(hi.height) * P))
+        let okTop = reachable(from: nil, to: mapObjs[6].id), okHouse = reachable(from: nil, to: hs.base)
+        ("구름까지 길 있음: \(okTop)  집(발판 \(hs.base.map(String.init) ?? "바닥")): \(okHouse)" as NSString)
+            .draw(at: CGPoint(x: 10, y: 10), withAttributes: [.font: NSFont.systemFont(ofSize: 13)])
+        bg.unlockFocus()
+        let rep = NSBitmapImageRep(data: bg.tiffRepresentation!)!
+        try? rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "\(dir)/map-tower.png"))
+    }
+    // 그림 팔레트
+    mapEditor.build()
+    if let cv = mapEditor.panel?.contentView {
+        mapEditor.select(4)
+        cv.layoutSubtreeIfNeeded()
+        let rep = cv.bitmapImageRepForCachingDisplay(in: cv.bounds)!
+        cv.cacheDisplay(in: cv.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "\(dir)/palette.png"))
     }
     mapEditor.tool = nil
     mapObjs = []
