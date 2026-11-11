@@ -13,10 +13,12 @@
 //   생각 중이면 턱 괴고 고민, 오래 걸리면 도토리 까먹으며 기다리고, 다 끝나면 기뻐하고,
 //   허락이 필요하면 마우스 쪽으로 와서 손 흔들고, 에러면 털이 쭈뼛, 테스트 통과면 공중제비
 // - 배고픔/기분: 배고프면 시무룩, 기분 좋으면 높이 뛰어 활강. 배부를 때 받은 도토리는 묻어뒀다가 나중에 꺼내 먹음
-// - 밤(23시~6시)엔 둥지에서 자고, 그때 컴퓨터 하고 있으면 잔소리. 아침엔 기지개
-// - 마우스를 휙휙 흔들면 쫓아와서 덮침, 휴지통에 뭘 버리면 뒤적이러 감
+// - 밤(23시~6시)엔 집에 들어가 자고, 아침엔 기지개
+// - 다람쥐 근처에서 마우스를 흔들면 쫓아와서 덮침 (메뉴의 '마우스 잡기 놀이'로도 시작), 휴지통에 뭘 버리면 뒤적이러 감
 // - 배터리가 부족하면 기운 없음, 비나 눈이 오면 우산
 // - 여러 마리면 술래잡기, 도토리 쟁탈전, 노래할 땐 화음
+// - 다람쥐마다 이름과 성격(장난꾸러기/먹보/잠꾸러기/겁쟁이/노래쟁이)이 있고, 성격에 맞는 머리 장식을 함
+// - 바탕화면에 다람쥐 집: 모양, 지붕 색, 장식을 고르고 끌어서 옮김. 밤엔 들어가서 자고 낮에도 가끔 들름
 import AppKit
 import IOKit.ps
 
@@ -426,6 +428,66 @@ let world = World()
 
 enum Mode { case wall, floor, air, held }
 
+// 다람쥐마다 다른 성격. 성격에 맞는 머리 장식을 하고, 말투와 하는 짓이 달라짐
+enum Personality: String, CaseIterable {
+    case playful, glutton, sleepy, shy, singer
+
+    var title: String {
+        switch self {
+        case .playful: return "장난꾸러기"
+        case .glutton: return "먹보"
+        case .sleepy: return "잠꾸러기"
+        case .shy: return "겁쟁이"
+        case .singer: return "노래쟁이"
+        }
+    }
+
+    var emoji: String {
+        switch self {
+        case .playful: return "🧢"
+        case .glutton: return "🌰"
+        case .sleepy: return "💤"
+        case .shy: return "🎀"
+        case .singer: return "🌼"
+        }
+    }
+
+    var accessory: Accessory {
+        switch self {
+        case .playful: return .cap
+        case .glutton: return .acornHat
+        case .sleepy: return .nightcap
+        case .shy: return .ribbon
+        case .singer: return .flower
+        }
+    }
+
+    // 클릭했을 때 하는 말
+    var pokeLines: [String] {
+        switch self {
+        case .playful: return ["놀자!", "나 잡아봐라~", "히히", "날아볼까?", "심심해!"]
+        case .glutton: return ["도토리 줘!", "배고파~", "간식 시간?", "도토리 냄새!", "하나만 더…"]
+        case .sleepy: return ["하암…", "졸려…", "5분만…", "음냐…", "왜 깨워…"]
+        case .shy: return ["히익!", "까, 깜짝이야…", "///", "아, 안녕…", "부끄러워…"]
+        case .singer: return ["라라라~ ♪", "노래 틀어줘!", "도레미~", "♪♪", "같이 부를래?"]
+        }
+    }
+
+    // 가만히 있다가 하는 혼잣말
+    var idleLines: [String] {
+        switch self {
+        case .playful: return ["심심해~", "뭐 하고 놀지?", "마우스 흔들어줘!"]
+        case .glutton: return ["도토리 먹고 싶다…", "간식 없나?", "꼬르륵"]
+        case .sleepy: return ["하암…", "졸려…", "낮잠 잘까…"]
+        case .shy: return ["…", "(두리번)", "조, 조용하다…"]
+        case .singer: return ["♪ 흥얼흥얼~", "♪ 라라라~", "노래 듣고 싶다~"]
+        }
+    }
+
+    // 자러 가는 시각과 일어나는 시각
+    var bed: (sleep: Int, wake: Int) { self == .sleepy ? (21, 8) : (23, 6) }
+}
+
 // 멈춰서 하는 행동
 enum Act: Equatable {
     case none, sing, harmony, think(String), wait(Int), done, cheer, attention, startle, eat, dig, greet
@@ -457,6 +519,13 @@ final class Squirrel {
     var nested = false          // 둥지에서 자는 중
     var tired = false           // 배터리가 없거나 너무 배고파서 기운 없음
     var lively: CGFloat = 0.5   // 기분
+    var personality = Personality.playful
+    var name = ""
+    // 지금이 이 다람쥐가 잘 시간인지
+    var bedtime: Bool {
+        let h = world.hour, b = personality.bed
+        return h >= b.sleep || h < b.wake
+    }
     var bubble: String?
     var bubbleTime: CGFloat = 0
     var time: CGFloat = 0
@@ -610,7 +679,7 @@ final class Squirrel {
     func rest() {
         targetSpeed = 0
         // 기운 없으면 자주, 신나 있으면 덜 졺
-        let sleepy = tired ? 0.7 : 0.35 - (lively - 0.5) * 0.3
+        let sleepy = (tired ? 0.7 : 0.35 - (lively - 0.5) * 0.3) + (personality == .sleepy ? 0.3 : 0)
         if rnd(0, 1) < sleepy {
             sleeping = true; timer = rnd(6, 14)
         } else {
@@ -634,7 +703,7 @@ final class Squirrel {
     func pickFloor() {
         if nested {
             // 밤새 둥지에서 자고, 아침이 되면 기지개
-            if world.night { sleeping = true; timer = rnd(20, 40); return }
+            if bedtime { sleeping = true; timer = rnd(20, 40); return }
             nested = false
             greetTime = 3.5
         }
@@ -643,6 +712,8 @@ final class Squirrel {
             say(world.lowBattery ? "배터리가… 부족해…" : "배고파… 힘없어…", 2.2)
         } else if needs.hungry && rnd(0, 1) < 0.2 {
             say(["배고파…", "도토리 줘~", "꼬르륵…"].randomElement()!, 2)
+        } else if rnd(0, 1) < 0.1 {
+            say(personality.idleLines.randomElement()!, 2)
         }
         // 기분 좋으면 가끔 높이 뛰어올라 활강
         if lively > 0.7 && !tired && surface == nil && rnd(0, 1) < 0.12 {
@@ -704,13 +775,18 @@ final class Squirrel {
         if sleeping {
             sleeping = false
             nested = false
-            say("깜짝!")
+            say(personality == .sleepy ? "5분만 더…" : "깜짝!")
             timer = rnd(1, 2)
+        } else if rnd(0, 1) < 0.2 {
+            say("나는 \(name)! \(personality.title)야", 2.2)
         } else {
-            say(["안녕!", "도토리 줘!", "간지러워!", "뭐야?", "♥", "히히", "날아볼까?"].randomElement()!)
+            say(personality.pokeLines.randomElement()!)
         }
-        // 바닥에 있으면 폴짝
-        if mode == .floor { hop(CGVector(dx: 0, dy: 420)) }
+        // 바닥에 있으면 폴짝 (겁쟁이는 옆으로 도망)
+        if mode == .floor {
+            let away: CGFloat = personality == .shy ? (Bool.random() ? 220 : -220) : 0
+            hop(CGVector(dx: away, dy: 420))
+        }
     }
 
     func hop(_ v: CGVector) {
@@ -770,7 +846,8 @@ final class Squirrel {
     func petted() {
         happyTime = 2
         needs.cheer(0.1)
-        say(sleeping ? "음냐..." : ["헤헤 ♥", "기분 좋아~", "더 해줘!"].randomElement()!)
+        let lines = personality == .shy ? ["부, 부끄러워… ///", "헤헤…", "…좋아"] : ["헤헤 ♥", "기분 좋아~", "더 해줘!"]
+        say(sleeping ? "음냐..." : lines.randomElement()!)
     }
 
     // 0: 가만히, 1/2: 걷는 프레임
@@ -840,7 +917,19 @@ let palette: [Character: (UInt8, UInt8, UInt8)] = [
     "u": (156, 118, 84),    // 흙
     "v": (120, 88, 62),     // 진한 흙
     "r": (236, 108, 108),   // 우산
-    "R": (252, 236, 220),   // 우산 줄무늬
+    "R": (252, 236, 220),   // 우산 줄무늬, 모자 챙
+    "c": (120, 150, 220),   // 잠옷 모자
+    "C": (90, 116, 186),    // 잠옷 모자 그늘
+    "j": (250, 208, 90),    // 노란 꽃, 불빛, 문고리
+    "L": (112, 172, 92),    // 풀, 잎
+    "K": (80, 136, 70),     // 진한 풀
+    "W": (196, 146, 98),    // 통나무
+    "V": (156, 110, 72),    // 진한 통나무
+    "D": (116, 78, 52),     // 문
+    "G": (176, 218, 240),   // 유리창 (밤에 누가 있으면 노랗게)
+    "S": (244, 232, 208),   // 버섯 기둥, 점
+    "s": (222, 204, 176),   // 버섯 기둥 그늘
+    "P": (204, 112, 72),    // 화분
 ]
 
 // 둥지 (밤에만 나타남, 다람쥐 다리를 가림)
@@ -1036,7 +1125,8 @@ func outlined(_ g: Grid) -> Grid {
     return o
 }
 
-func image(_ g: Grid) -> CGImage {
+// extra: 집 지붕 색처럼 그때그때 바뀌는 색
+func image(_ g: Grid, _ extra: [Character: (UInt8, UInt8, UInt8)] = [:]) -> CGImage {
     let h = g.count, w = g[0].count
     let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
                         space: CGColorSpaceCreateDeviceRGB(),
@@ -1045,7 +1135,7 @@ func image(_ g: Grid) -> CGImage {
     for y in 0..<h {
         for x in 0..<w {
             let i = (y * w + x) * 4
-            if let (r, gg, b) = palette[g[y][x]] {
+            if let (r, gg, b) = extra[g[y][x]] ?? palette[g[y][x]] {
                 px[i] = r; px[i + 1] = gg; px[i + 2] = b; px[i + 3] = 255
             } else {
                 px[i] = 0; px[i + 1] = 0; px[i + 2] = 0; px[i + 3] = 0
@@ -1055,13 +1145,13 @@ func image(_ g: Grid) -> CGImage {
     return ctx.makeImage()!
 }
 
-func finish(_ g: Grid, sleep: Bool) -> CGImage {
+func finish(_ g: Grid, sleep: Bool) -> Grid {
     var g = g
     if sleep { closeEyes(&g) }
-    return image(outlined(pad(g, t: 1, l: 1, r: 1, b: 1)))
+    return g
 }
 
-func climbSprite(frame: Int, sleep: Bool) -> CGImage {
+func climbSprite(frame: Int, sleep: Bool) -> Grid {
     var g: Grid = climbBody.map(Array.init)
     // [왼팔, 오른팔, 왼다리, 오른다리]: 0 가만히, 1/2 대각선끼리 번갈아 뻗으며 기어오름
     let reach: [[Bool]] = [[true, true, false, false], [true, false, false, true], [false, true, true, false]]
@@ -1073,7 +1163,7 @@ func climbSprite(frame: Int, sleep: Bool) -> CGImage {
     return finish(g, sleep: sleep)
 }
 
-func sideSprite(frame: Int, sleep: Bool) -> CGImage {
+func sideSprite(frame: Int, sleep: Bool) -> Grid {
     var g: Grid = sideBody.map(Array.init)
     // 다리: 기준 x, 앞(1)/가운데(0)/뒤(-1)
     func leg(_ x: Int, _ s: Int, _ ch: Character) {
@@ -1089,7 +1179,7 @@ func sideSprite(frame: Int, sleep: Bool) -> CGImage {
     return finish(g, sleep: sleep)
 }
 
-func frontSprite(open: Bool, happy: Bool) -> CGImage {
+func frontSprite(open: Bool, happy: Bool) -> Grid {
     var g: Grid = frontBody.map(Array.init)
     // 다문 입은 ω, 벌린 입은 코 밑에 한 칸 띄워서 동그랗게
     let mouth: [(Int, Int)] = open ? [(10, 8), (11, 8), (10, 9), (11, 9)] : [(9, 7), (10, 8), (11, 8), (12, 7)]
@@ -1103,7 +1193,7 @@ func frontSprite(open: Bool, happy: Bool) -> CGImage {
 }
 
 // 턱 괴고 고민 (frame 1은 눈을 가늘게)
-func thinkSprite(frame: Int) -> CGImage {
+func thinkSprite(frame: Int) -> Grid {
     var g: Grid = frontBody.map(Array.init)
     for (x, y) in [(12, 10), (13, 10), (12, 11), (13, 11)] { g[y][x] = "w" }
     for (x, y) in [(12, 8), (13, 8), (12, 9), (13, 9)] { g[y][x] = "f" }
@@ -1113,7 +1203,7 @@ func thinkSprite(frame: Int) -> CGImage {
 }
 
 // 도토리를 두 손으로 들고 오물오물 (볼이 빵빵)
-func eatSprite(frame: Int) -> CGImage {
+func eatSprite(frame: Int) -> Grid {
     var g: Grid = frontBody.map(Array.init)
     for (x, y) in [(8, 10), (9, 10), (12, 10), (13, 10), (8, 11), (9, 11), (12, 11), (13, 11)] { g[y][x] = "w" }
     for y in 6...8 { g[y][3] = "g" }
@@ -1129,7 +1219,7 @@ func eatSprite(frame: Int) -> CGImage {
 }
 
 // 한 손을 번쩍 들고 흔들기 (Claude가 불러요)
-func waveSprite(frame: Int) -> CGImage {
+func waveSprite(frame: Int) -> Grid {
     var g: Grid = frontBody.map(Array.init)
     for (x, y) in [(8, 10), (9, 10), (8, 11), (9, 11)] { g[y][x] = "w" }
     for (x, y) in [(10, 8), (11, 8), (10, 9), (11, 9)] { g[y][x] = "m" }
@@ -1141,7 +1231,7 @@ func waveSprite(frame: Int) -> CGImage {
 }
 
 // 깜짝 놀라서 털이 쭈뼛, 눈이 동그래짐 (에러!)
-func startleSprite() -> CGImage {
+func startleSprite() -> Grid {
     var g: Grid = frontBody.map(Array.init)
     // 동그란 눈: 흰자 가운데 작은 눈동자
     for y in 4...7 { for x in 4...17 where g[y][x] == "k" || g[y][x] == "h" { g[y][x] = "h" } }
@@ -1162,25 +1252,66 @@ enum Pose: Hashable {
     case wave(Int), startle, nest, mound, umbrella
 }
 
-var spriteCache: [Pose: CGImage] = [:]
-func sprite(_ pose: Pose) -> CGImage {
-    if let s = spriteCache[pose] { return s }
-    let s: CGImage
-    switch pose {
-    case .climb(let f, let sleep): s = climbSprite(frame: f, sleep: sleep)
-    case .side(let f, let sleep): s = sideSprite(frame: f, sleep: sleep)
-    case .front(let open, let happy): s = frontSprite(open: open, happy: happy)
-    case .think(let f): s = thinkSprite(frame: f)
-    case .eat(let f): s = eatSprite(frame: f)
-    case .glide: s = finish(glideBody.map(Array.init), sleep: false)
-    case .acorn: s = finish(acornBody.map(Array.init), sleep: false)
-    case .wave(let f): s = waveSprite(frame: f)
-    case .startle: s = startleSprite()
-    case .nest: s = finish(nestBody.map(Array.init), sleep: false)
-    case .mound: s = finish(moundBody.map(Array.init), sleep: false)
-    case .umbrella: s = finish(umbrellaBody.map(Array.init), sleep: false)
+// 성격에 맞는 머리 장식
+enum Accessory: String, CaseIterable {
+    case cap, acornHat, nightcap, ribbon, flower
+
+    var art: [String] {
+        switch self {
+        case .cap: return ["....rrrr......", "...rrrrrr.....", "..rrrRrrrr....", "..rrrrrrrrRRRR"]
+        case .acornHat: return [".....a.....", "...aaaaa...", "..aaaaaaa..", ".aaaaaaaaa.", "aaaaaaaaaaa"]
+        case .nightcap: return ["...........hh", "......ccc..hh", "....cccccCc..", "..cccccCccc..",
+                                ".cccccccc....", "hhhhhhhhhh..."]
+        case .ribbon: return ["ppp...ppp", "pppp.pppp", "ppppnpppp", "pppp.pppp", "ppp...ppp"]
+        case .flower: return ["..j..", ".jjj.", "jjajj", ".jjjL", "..jL."]
+        }
     }
-    spriteCache[pose] = s
+}
+
+// 머리 꼭대기 (장식의 가운데 x, 장식 아랫줄이 놓일 행)
+func headTop(_ pose: Pose) -> (x: Int, y: Int)? {
+    switch pose {
+    case .climb, .front, .think, .eat, .wave, .startle: return (11, 1)
+    case .side: return (17, 1)
+    case .glide: return (14, 1)
+    default: return nil
+    }
+}
+
+// 장식이 들어갈 만큼 위를 늘리고, 빈 칸에만 찍어서 귀는 장식 앞에 보이게
+func wear(_ g: Grid, _ acc: Accessory, at head: (x: Int, y: Int)) -> Grid {
+    let art = acc.art
+    let h = art.count
+    var out = pad(g, t: h, l: 0, r: 0, b: 0)
+    let left = head.x - (art.map(\.count).max() ?? 0) / 2
+    stamp(&out, art, x: left, y: head.y + 1)
+    return out
+}
+
+struct SpriteKey: Hashable { let pose: Pose; let acc: Accessory? }
+
+var spriteCache: [SpriteKey: CGImage] = [:]
+func sprite(_ pose: Pose, _ acc: Accessory? = nil) -> CGImage {
+    let key = SpriteKey(pose: pose, acc: acc)
+    if let s = spriteCache[key] { return s }
+    var g: Grid
+    switch pose {
+    case .climb(let f, let sleep): g = climbSprite(frame: f, sleep: sleep)
+    case .side(let f, let sleep): g = sideSprite(frame: f, sleep: sleep)
+    case .front(let open, let happy): g = frontSprite(open: open, happy: happy)
+    case .think(let f): g = thinkSprite(frame: f)
+    case .eat(let f): g = eatSprite(frame: f)
+    case .glide: g = glideBody.map(Array.init)
+    case .acorn: g = acornBody.map(Array.init)
+    case .wave(let f): g = waveSprite(frame: f)
+    case .startle: g = startleSprite()
+    case .nest: g = nestBody.map(Array.init)
+    case .mound: g = moundBody.map(Array.init)
+    case .umbrella: g = umbrellaBody.map(Array.init)
+    }
+    if let acc = acc, let head = headTop(pose) { g = wear(g, acc, at: head) }
+    let s = image(outlined(pad(g, t: 1, l: 1, r: 1, b: 1)))
+    spriteCache[key] = s
     return s
 }
 
@@ -1265,7 +1396,7 @@ final class PetView: NSView {
         c.setShouldAntialias(false)
 
         let pose = self.pose
-        let img = sprite(pose)
+        let img = sprite(pose, sq.personality.accessory)
         let w = CGFloat(img.width) * P, h = CGFloat(img.height) * P
         // 바닥 위에 서 있으면 발이 y=8, 벽이나 손에 있으면 창 가운데
         let grounded = sq.mode == .floor || sq.mode == .air
@@ -1414,7 +1545,7 @@ final class SpriteView: NSView {
     }
 }
 
-// 바탕화면에 놓이는 작은 그림 (도토리, 흙더미, 둥지). pos는 바닥에 닿는 아래 가운데
+// 바탕화면에 놓이는 작은 그림 (도토리, 흙더미). pos는 바닥에 닿는 아래 가운데
 class Prop {
     var pos: CGPoint
     let window: NSWindow
@@ -1469,8 +1600,314 @@ final class Acorn: Prop {
     }
 }
 
+// MARK: - 다람쥐 집 (모양, 지붕 색, 장식을 고를 수 있고 끌어서 옮김)
+
+enum HouseStyle: String, CaseIterable {
+    case cabin, mushroom, acorn, nest
+
+    var title: String {
+        switch self {
+        case .cabin: return "나무 오두막"
+        case .mushroom: return "버섯집"
+        case .acorn: return "도토리집"
+        case .nest: return "둥지"
+        }
+    }
+
+    // X, Y는 고른 지붕 색으로 칠해짐
+    var art: [String] {
+        switch self {
+        case .cabin: return [
+            "..............XX..........VV..",
+            "............XXXXXX........VV..",
+            "..........XXXXXXXXXX......VV..",
+            "........XXXXXXXXXXXXXX....VV..",
+            "......XXXXXXXXXXXXXXXXXX..VV..",
+            "....XXXXXXXXXXXXXXXXXXXXXXVV..",
+            "..XXXXXXXXXXXXXXXXXXXXXXXXXXX.",
+            "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYY",
+            "...WWWWWWWWWWWWWWWWWWWWWWWW...",
+            "...VVVVVVVVVVVVVVVVVVVVVVVV...",
+            "...WWWooooooWWWWWWWWWWWWWWW...",
+            "...VVVoGGoGoVVVVVVaaaaVVVVV...",
+            "...WWWoGGoGoWWWWWaDDDDaWWWW...",
+            "...VVVooooooVVVVaDDDDDDaVVV...",
+            "...WWWoGGoGoWWWWaDDDDDDaWWW...",
+            "...VVVoGGoGoVVVVaDDDDjDaVVV...",
+            "...WWWooooooWWWWaDDDDDDaWWW...",
+            "...VVVVVVVVVVVVVaDDDDDDaVVV...",
+            "...WWWWWWWWWWWWWaDDDDDDaWWW...",
+            "..VVVVVVVVVVVVVVaDDDDDDaVVVV..",
+        ]
+        case .mushroom: return [
+            "...........XXXXXXXX...........",
+            "........XXXXXXXXXXXXXX........",
+            "......XXXXSSXXXXXXXXXXXX......",
+            "....XXXXXSSSSXXXXXXXSSXXXX....",
+            "...XXXXXXXSSXXXXXXXSSSSXXXX...",
+            "..XXXSSXXXXXXXXXXXXXSSXXXXXX..",
+            ".XXXSSSSXXXXXXSSXXXXXXXXXSSXX.",
+            ".XXXXSSXXXXXXSSSSXXXXXXXSSSSX.",
+            "XXXXXXXXXXXXXXSSXXXXXXXXXSSXXX",
+            "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYY",
+            ".......ssssssssssssssss.......",
+            "......SSSSSSSSSSSSSSSSSS......",
+            "......SSoooSSSSSSaaaaSSS......",
+            "......SSoGoSSSSSaDDDDaSS......",
+            "......SSoooSSSSaDDDDDDaS......",
+            "......SSSSSSSSSaDDDDjDaS......",
+            "......SSSSSSSSSaDDDDDDaS......",
+            "......SSSSSSSSSaDDDDDDaS......",
+            ".....SSSSSSSSSSaDDDDDDaSS.....",
+            "...KLLKLLLKLLLLaDDDDDDaLLKL...",
+        ]
+        case .acorn: return [
+            ".............aa.............",
+            ".............aa.............",
+            "..........XXXXXXXX..........",
+            "........XXYXXYXXYXXX........",
+            "......XXYXXYXXYXXYXXXX......",
+            "....XXXXXYXXYXXYXXYXXXXX....",
+            "...XYXXYXXYXXYXXYXXYXXYXX...",
+            "..YYYYYYYYYYYYYYYYYYYYYYYY..",
+            "...bbbbbbbbbbbbbbbbbbbbbb...",
+            "...blllbbbbbbbbbbbbbbbbbb...",
+            "...bllbbbbbbbbbbbbbbbbbbb...",
+            "...blbbbooooobbbbbbbbbbbb...",
+            "...bbbbboGoGobbbbaaaabbbb...",
+            "....bbbbooooobbbaDDDDabb....",
+            "....bbbboGoGobbaDDDDDDab....",
+            ".....bbbooooobbaDDDDjDa.....",
+            "......bbbbbbbbbaDDDDDDa.....",
+            ".......bbbbbbbbaDDDDDDa.....",
+            "........bbbbbbbaDDDDDDa.....",
+        ]
+        case .nest: return nestBody
+        }
+    }
+
+    // 문 가운데, 지붕 꼭대기, 랜턴 자리 (그림 기준 열/행)
+    var door: Int { [.cabin: 19, .mushroom: 18, .acorn: 18, .nest: 16][self]! }
+    var peak: Int { [.cabin: 14, .mushroom: 14, .acorn: 13, .nest: 3][self]! }
+    var lantern: (x: Int, y: Int)? {
+        switch self {
+        case .cabin: return (13, 11)
+        case .mushroom: return (11, 13)
+        case .acorn: return (12, 12)
+        case .nest: return nil
+        }
+    }
+}
+
+enum Decor: String, CaseIterable {
+    case flag, pot, mailbox, lantern, fence
+
+    var title: String {
+        switch self {
+        case .flag: return "깃발"
+        case .pot: return "화분"
+        case .mailbox: return "우체통"
+        case .lantern: return "랜턴"
+        case .fence: return "울타리"
+        }
+    }
+
+    var art: [String] {
+        switch self {
+        case .flag: return ["or", "orrr", "orrrr", "orr", "o", "o", "o"]
+        case .pot: return ["p.j.p", ".LLL.", "PPPPP", ".PPP.", ".PPP."]
+        case .mailbox: return ["rrrr", "rrrr", "rrRr", ".o..", ".o..", ".o.."]
+        case .lantern: return ["o", ".oo", "ojjo", "ojjo", ".oo"]
+        case .fence: return ["W.W.W", "WWWWW", "W.W.W", "WWWWW", "W.W.W"]
+        }
+    }
+}
+
+let roofColors: [(name: String, rgb: (UInt8, UInt8, UInt8))] = [
+    ("빨강", (222, 92, 84)), ("파랑", (92, 140, 214)), ("초록", (98, 170, 98)),
+    ("노랑", (236, 186, 72)), ("보라", (160, 112, 200)), ("분홍", (238, 140, 170)),
+]
+
+final class HouseView: NSView {
+    var image: CGImage?
+    var sleepers = 0
+    var time: CGFloat = 0
+    var chimney = CGPoint.zero
+    var onKnock: (() -> Void)?
+    var onMoved: (() -> Void)?
+    var menuMaker: (() -> NSMenu)?
+    var dragging = false
+    private var moved = false
+    private var grab = CGPoint.zero
+
+    override var isOpaque: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let c = NSGraphicsContext.current?.cgContext, let img = image else { return }
+        c.clear(bounds)
+        c.interpolationQuality = .none
+        c.draw(img, in: CGRect(x: 0, y: 0, width: CGFloat(img.width) * P, height: CGFloat(img.height) * P))
+        // 안에서 자고 있으면 Zzz
+        guard sleepers > 0 else { return }
+        for i in 0..<3 {
+            let t = (time * 0.5 + CGFloat(i) / 3).truncatingRemainder(dividingBy: 1)
+            let font = NSFont.boldSystemFont(ofSize: 9 + t * 8)
+            let p = CGPoint(x: chimney.x + t * 16 + sin(t * 9) * 3, y: chimney.y + t * 28)
+            ("z" as NSString).draw(at: p, withAttributes: [.font: font, .foregroundColor: inkNS.withAlphaComponent(1 - t * t)])
+        }
+    }
+
+    // 끌면 옮기고, 그냥 누르면 노크
+    override func mouseDown(with e: NSEvent) {
+        dragging = true
+        moved = false
+        let m = NSEvent.mouseLocation, o = window!.frame.origin
+        grab = CGPoint(x: m.x - o.x, y: m.y - o.y)
+    }
+
+    override func mouseDragged(with e: NSEvent) {
+        let m = NSEvent.mouseLocation
+        moved = true
+        window?.setFrameOrigin(NSPoint(x: m.x - grab.x, y: m.y - grab.y))
+    }
+
+    override func mouseUp(with e: NSEvent) {
+        dragging = false
+        if moved { onMoved?() } else { onKnock?() }
+    }
+
+    override func rightMouseDown(with e: NSEvent) {
+        if let menu = menuMaker?() { NSMenu.popUpContextMenu(menu, with: e, for: self) }
+    }
+}
+
+final class House {
+    var style: HouseStyle
+    var color: Int
+    var decor: Set<Decor>
+    var shown: Bool
+    var x: CGFloat               // 집 그림 가운데의 화면 x
+    let window: NSWindow
+    let view = HouseView()
+    private var imageSize = CGSize.zero
+    private var lit = false
+    private let d = UserDefaults.standard
+    // 그림 양옆과 위에 장식 자리
+    private let sideRoom = 12, topRoom = 8
+
+    init() {
+        style = HouseStyle(rawValue: d.string(forKey: "houseStyle") ?? "") ?? .cabin
+        color = min(max(d.integer(forKey: "houseColor"), 0), roofColors.count - 1)
+        if let saved = d.array(forKey: "houseDecor") as? [String] {
+            decor = Set(saved.compactMap(Decor.init(rawValue:)))
+        } else {
+            decor = [.flag, .pot]
+        }
+        shown = d.object(forKey: "houseShown") == nil ? true : d.bool(forKey: "houseShown")
+        let b = NSScreen.screens[0].visibleFrame
+        var hx = d.object(forKey: "houseX") == nil ? b.minX + 170 : CGFloat(d.double(forKey: "houseX"))
+        // 화면 구성이 바뀌어서 집이 화면 밖이면 다시 데려옴
+        if !NSScreen.screens.contains(where: { $0.frame.minX + 60 < hx && hx < $0.frame.maxX - 60 }) { hx = b.minX + 170 }
+        x = hx
+
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 10, height: 10), styleMask: .borderless,
+                          backing: .buffered, defer: false)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.level = petLevel()
+        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+        window.contentView = view
+        view.onMoved = { [unowned self] in
+            // 놓은 자리 아래 바닥에 내려앉음
+            self.x = self.window.frame.minX + self.imageSize.width / 2
+            self.place()
+            self.save()
+        }
+        rebuild()
+        if shown { window.orderFrontRegardless() }
+    }
+
+    // 문 앞 (다람쥐가 걸어갈 곳)
+    var doorX: CGFloat {
+        x - imageSize.width / 2 + CGFloat(sideRoom + style.door + 1) * P
+    }
+
+    func save() {
+        d.set(style.rawValue, forKey: "houseStyle")
+        d.set(color, forKey: "houseColor")
+        d.set(decor.map(\.rawValue), forKey: "houseDecor")
+        d.set(shown, forKey: "houseShown")
+        d.set(Double(x), forKey: "houseX")
+    }
+
+    func place() {
+        window.setFrameOrigin(NSPoint(x: (x - imageSize.width / 2).rounded(), y: groundY(at: x) - 4))
+    }
+
+    // 고른 모양, 색, 장식으로 그림을 다시 만듦
+    func rebuild() {
+        let art = style.art
+        let aw = art.map(\.count).max() ?? 0, ah = art.count
+        let w = aw + sideRoom * 2, h = ah + topRoom
+        var g: Grid = Array(repeating: [Character](repeating: ".", count: w), count: h)
+        // 앞에 보여야 하는 것부터 찍음 (stamp는 빈 칸에만 찍힘)
+        func put(_ dc: Decor, x: Int, bottom: Int) {
+            guard decor.contains(dc) else { return }
+            stamp(&g, dc.art, x: x, y: bottom - dc.art.count + 1)
+        }
+        if let l = style.lantern { put(.lantern, x: sideRoom + l.x, bottom: topRoom + l.y + 4) }
+        put(.pot, x: 6, bottom: h - 1)
+        put(.mailbox, x: w - 10, bottom: h - 1)
+        put(.fence, x: 0, bottom: h - 1)
+        put(.fence, x: w - 5, bottom: h - 1)
+        // 깃발은 지붕 꼭대기 위에
+        let top = art.firstIndex { Array($0)[style.peak] != "." } ?? 0
+        put(.flag, x: sideRoom + style.peak, bottom: topRoom + top - 1)
+        stamp(&g, art, x: sideRoom, y: topRoom)
+
+        let roof = roofColors[color].rgb
+        let dark = (UInt8(Double(roof.0) * 0.75), UInt8(Double(roof.1) * 0.75), UInt8(Double(roof.2) * 0.75))
+        var extra: [Character: (UInt8, UInt8, UInt8)] = ["X": roof, "Y": dark]
+        if lit { extra["G"] = (255, 216, 122) }
+        let img = image(outlined(pad(g, t: 1, l: 1, r: 1, b: 1)), extra)
+        imageSize = CGSize(width: CGFloat(img.width) * P, height: CGFloat(img.height) * P)
+        view.image = img
+        view.chimney = CGPoint(x: imageSize.width / 2 + 30, y: imageSize.height - CGFloat(topRoom) * P)
+        // 위쪽은 Zzz 자리
+        let size = NSSize(width: imageSize.width, height: imageSize.height + 44)
+        window.setContentSize(size)
+        view.frame = NSRect(origin: .zero, size: size)
+        place()
+        view.needsDisplay = true
+    }
+
+    // 그림이 있는 자리 (마우스가 여기 있을 때만 클릭을 받음)
+    var body: CGRect {
+        let art = style.art
+        let aw = CGFloat(art.map(\.count).max() ?? 0) * P, ah = CGFloat(art.count) * P
+        return CGRect(x: x - aw / 2, y: window.frame.minY, width: aw, height: ah)
+    }
+
+    func tick(_ dt: CGFloat, sleepers: Int, anyoneHome: Bool) {
+        view.time += dt
+        if anyoneHome != lit {
+            lit = anyoneHome
+            rebuild()
+        }
+        if sleepers != view.sleepers || sleepers > 0 {
+            view.sleepers = sleepers
+            view.needsDisplay = true
+        }
+        window.ignoresMouseEvents = !view.dragging && !body.contains(NSEvent.mouseLocation)
+    }
+}
+
 // 다람쥐가 가려는 곳
-enum Goal: Equatable { case acorn(ObjectIdentifier), mouse, approach, tag, flee, stash(CGFloat), trash, nest }
+enum Goal: Equatable {
+    case acorn(ObjectIdentifier), mouse, approach, tag, flee, stash(CGFloat), trash, home, visit
+}
 // 도착해서 하는 일
 enum Chore { case bury, unbury(CGFloat), trash }
 
@@ -1479,19 +1916,26 @@ final class Pet {
     let view: PetView
     let window: NSWindow
     var index = 0
+    var lead = true                 // 노래할 때 가사를 부르는 다람쥐 (나머지는 화음)
     var goal: Goal?
     var chore: Chore?
     var claimed: ObjectIdentifier?  // "내꺼야!" 하고 외친 도토리
     var chaseTime: CGFloat = 0
+    var inside = false              // 집 안에 들어가 있음
+    var insideTime: CGFloat = 0     // 낮에 잠깐 들른 거면 남은 시간
+    var wantsVisit = false
+    var visitCheck = rnd(90, 240)
     private var chaseCool: CGFloat = 0
     private var calm: CGFloat = 0
     private var mouseSpeed: CGFloat = 0
     private var nag: CGFloat = 20
     private var lastFlip = Date.distantPast
 
-    init(at p: CGPoint) {
+    init(at p: CGPoint, name: String, personality: Personality) {
         sq.pos = p
         sq.dir = Bool.random() ? 1 : -1
+        sq.name = name
+        sq.personality = personality
         view = PetView(frame: NSRect(x: 0, y: 0, width: W, height: W), squirrel: sq)
         window = NSWindow(contentRect: view.frame, styleMask: .borderless, backing: .buffered, defer: false)
         window.isOpaque = false
@@ -1513,7 +1957,7 @@ final class Pet {
             window.orderFrontRegardless()
         }
         sq.tired = world.lowBattery || needs.hunger > 0.85
-        sq.lively = needs.mood
+        sq.lively = min(1, needs.mood + (sq.personality == .playful ? 0.25 : 0))
         sq.act = currentAct()
         switch sq.act {
         case .sing: sq.lyric = music.currentLine
@@ -1545,29 +1989,32 @@ final class Pet {
             rub = max(0, rub - dt * 300)
         }
         if rub > 700 { rub = 0; sq.petted() }
-        watchMouse(m, moved: moved, dt)
+        watchMouse(m, moved: moved, dist: dist, dt)
         lastMouse = m
     }
 
     private var rub: CGFloat = 0
     private var lastMouse = CGPoint.zero
 
-    // 마우스를 휙휙 흔들면 쫓아가서 덮침
-    private func watchMouse(_ m: CGPoint, moved: CGFloat, _ dt: CGFloat) {
-        mouseSpeed += (moved / max(dt, 0.001) - mouseSpeed) * min(1, dt * 8)
+    // 다람쥐 근처에서 마우스를 좌우로 흔들면 쫓아가서 덮침 (겁쟁이는 도망)
+    private func watchMouse(_ m: CGPoint, moved: CGFloat, dist: CGFloat, _ dt: CGFloat) {
+        mouseSpeed += (moved / max(dt, 0.001) - mouseSpeed) * min(1, dt * 6)
         if chaseTime > 0 {
             chaseTime -= dt
-            calm = mouseSpeed < 150 ? calm + dt : 0
-            if calm > 1.5 { chaseTime = 0; sq.say("어디 갔지?") }
-            if chaseTime <= 0 { chaseCool = 8 }
+            calm = mouseSpeed < 120 ? calm + dt : 0
+            if calm > 2 {
+                chaseTime = 0
+                sq.say(sq.personality == .shy ? "휴… 갔나?" : "어디 갔지?")
+            }
+            if chaseTime <= 0 { chaseCool = 6 }
         } else {
             chaseCool -= dt
+            // 장난꾸러기는 조금만 흔들어도 달려듦
+            let need: CGFloat = sq.personality == .playful ? 500 : 900
             let free = sq.act == .none || sq.act == .sing || sq.act == .harmony
-            if chaseCool <= 0, mouseSpeed > 2000, free, sq.mode == .floor, sq.target == nil, !sq.nested,
-               abs(m.x - sq.pos.x) < 600, m.y < sq.pos.y + 500 {
-                chaseTime = 5
-                calm = 0
-                sq.say("잡을 거야!", 1.2)
+            if chaseCool <= 0, mouseSpeed > need, dist > 60, dist < 700, free, sq.mode == .floor || sq.mode == .wall,
+               sq.target == nil, !sq.nested, !view.dragging {
+                startChase()
             }
         }
         // 둥지에서 자는데 아직 컴퓨터를 하고 있으면 잔소리
@@ -1580,7 +2027,14 @@ final class Pet {
         }
     }
 
-    func endChase() { chaseTime = 0; chaseCool = 8 }
+    func startChase() {
+        chaseTime = 6
+        calm = 0
+        sq.sleeping = false
+        sq.say(sq.personality == .shy ? "히익! 무서워!" : "잡을 거야!", 1.2)
+    }
+
+    func endChase() { chaseTime = 0; chaseCool = 6 }
 
     // 우선순위: 먹기 > 일하기 > 어디 가는 중 > Claude 반응 > 아침 인사 > 노래
     func currentAct() -> Act {
@@ -1599,7 +2053,7 @@ final class Pet {
             }
         }
         if sq.greetTime > 0 { return .greet }
-        if singAlong && music.playing { return index == 0 ? .sing : .harmony }
+        if singAlong && music.playing { return lead ? .sing : .harmony }
         return .none
     }
 }
@@ -1609,19 +2063,23 @@ func bar(_ v: CGFloat) -> String {
     return String(repeating: "■", count: n) + String(repeating: "□", count: 5 - n)
 }
 
+let petNames = ["밤톨", "도토리", "솔방울", "땅콩", "호두", "잣", "개암", "은행"]
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var pets: [Pet] = []
     var statusItem: NSStatusItem!
     var toggleItem: NSMenuItem!
     var statusLine: NSMenuItem!
     var stashItem: NSMenuItem!
+    var houseItem: NSMenuItem!
+    var petsHeader: NSMenuItem!
     var shown = true
     var last = CACurrentMediaTime()
     var windowRefresh: CGFloat = 0
     var musicPoll: CGFloat = 0
     var acorns: [Acorn] = []
     var mounds: [Prop] = []
-    var nest: Prop!
+    var house: House!
     var play: (chaser: Pet, runner: Pet, time: CGFloat)?
     var playCheck: CGFloat = 20
     var eatenItem: NSMenuItem!
@@ -1632,13 +2090,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    // 둥지는 주 화면 왼쪽 아래
-    var nestPos: CGPoint {
-        let b = NSScreen.screens[0].visibleFrame
-        return CGPoint(x: b.minX + 140, y: b.minY)
-    }
-
-    var props: [NSWindow] { acorns.map(\.window) + mounds.map(\.window) + [nest.window] }
+    var props: [NSWindow] { acorns.map(\.window) + mounds.map(\.window) }
 
     func applicationDidFinishLaunching(_ n: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -1663,18 +2115,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         weatherItem.state = weatherReact ? .on : .off
         menu.addItem(.separator())
         menu.addItem(withTitle: "도토리 주기", action: #selector(giveAcorn), keyEquivalent: "a").target = self
+        menu.addItem(withTitle: "마우스 잡기 놀이", action: #selector(playChase), keyEquivalent: "m").target = self
         eatenItem = menu.addItem(withTitle: "지금까지 먹은 도토리: \(eaten)개", action: nil, keyEquivalent: "")
         stashItem = menu.addItem(withTitle: "", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
+        houseItem = menu.addItem(withTitle: "다람쥐 집 꾸미기", action: nil, keyEquivalent: "")
+        menu.addItem(.separator())
+        petsHeader = menu.addItem(withTitle: "우리 다람쥐들 (성격 바꾸기)", action: nil, keyEquivalent: "")
         menu.addItem(withTitle: "다람쥐 한 마리 더", action: #selector(addPet), keyEquivalent: "n").target = self
         menu.addItem(withTitle: "한 마리 보내기", action: #selector(removePet), keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusItem.menu = menu
 
-        nest = Prop(.nest, at: nestPos, show: false)
+        // 집을 먼저 만들어서 다람쥐들이 그 앞을 지나다니게
+        house = House()
+        house.view.menuMaker = { [unowned self] in self.houseMenu() }
+        house.view.onKnock = { [unowned self] in self.knock() }
         mounds = needs.stash.map { Prop(.mound, at: CGPoint(x: $0, y: groundY(at: $0))) }
-        addPet()
+        // 지난번에 있던 다람쥐들이 그대로 돌아옴
+        let saved = UserDefaults.standard.array(forKey: "squirrels") as? [[String]] ?? []
+        for s in saved where s.count == 2 { spawn(name: s[0], personality: Personality(rawValue: s[1]) ?? .playful) }
+        if pets.isEmpty { addPet() }
+
         let t = Timer(timeInterval: 1.0 / 60, repeats: true) { [unowned self] _ in
             let now = CACurrentMediaTime()
             let dt = CGFloat(min(now - last, 0.05))
@@ -1696,26 +2159,159 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             world.tick(dt)
             if let news = world.news {
                 world.news = nil
-                pets.randomElement()?.sq.say(news, 2.5)
+                pets.filter { !$0.inside }.randomElement()?.sq.say(news, 2.5)
             }
             acorns.forEach { $0.tick(dt) }
-            plan()
+            plan(dt)
             updatePlay(dt)
-            for (i, p) in pets.enumerated() {
+            // 노래쟁이가 있으면 걔가 가사를 부르고, 없으면 첫째가
+            let singer = pets.first { $0.sq.personality == .singer && !$0.inside } ?? pets.first { !$0.inside }
+            for (i, p) in pets.enumerated() where !p.inside {
                 p.index = i
+                p.lead = p === singer
                 p.tick(dt, restack: restack)
             }
-            updateNest(restack: restack)
+            updateHouse(dt, restack: restack)
         }
         RunLoop.main.add(t, forMode: .common)
     }
 
     func applicationWillTerminate(_ n: Notification) { needs.save() }
 
-    // 메뉴를 열 때 컨디션 표시
+    // 메뉴를 열 때 컨디션, 다람쥐 목록, 집 메뉴를 새로 채움
     func menuWillOpen(_ menu: NSMenu) {
         statusLine.title = "배고픔 \(bar(needs.hunger))   기분 \(bar(needs.mood))"
         stashItem.title = "묻어둔 도토리: \(needs.stash.count)개"
+        houseItem.submenu = houseMenu()
+        for item in menu.items where item.tag >= 1000 { menu.removeItem(item) }
+        let at = menu.index(of: petsHeader) + 1
+        for (i, pet) in pets.enumerated() {
+            let sq = pet.sq
+            let item = NSMenuItem(title: "  \(sq.personality.emoji) \(sq.name) · \(sq.personality.title)", action: nil, keyEquivalent: "")
+            item.tag = 1000 + i
+            let sub = NSMenu()
+            for (j, p) in Personality.allCases.enumerated() {
+                let choice = sub.addItem(withTitle: "\(p.emoji) \(p.title)", action: #selector(setPersonality(_:)), keyEquivalent: "")
+                choice.target = self
+                choice.tag = i * 100 + j
+                choice.state = p == sq.personality ? .on : .off
+            }
+            item.submenu = sub
+            menu.insertItem(item, at: at + i)
+        }
+    }
+
+    @objc func setPersonality(_ item: NSMenuItem) {
+        let i = item.tag / 100, p = Personality.allCases[item.tag % 100]
+        guard pets.indices.contains(i) else { return }
+        pets[i].sq.personality = p
+        pets[i].sq.say("이제 나는 \(p.title)!", 2)
+        savePets()
+    }
+
+    func savePets() {
+        UserDefaults.standard.set(pets.map { [$0.sq.name, $0.sq.personality.rawValue] }, forKey: "squirrels")
+    }
+
+    // MARK: 집
+
+    func houseMenu() -> NSMenu {
+        let menu = NSMenu()
+        func add(_ title: String, _ action: Selector?, tag: Int = 0, on: Bool = false) {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.tag = tag
+            item.state = on ? .on : .off
+        }
+        add("집 보이기", #selector(toggleHouse), on: house.shown)
+        menu.addItem(.separator())
+        add("집 모양", nil)
+        for (i, s) in HouseStyle.allCases.enumerated() {
+            add("  " + s.title, #selector(setHouseStyle(_:)), tag: i, on: s == house.style)
+        }
+        menu.addItem(.separator())
+        add("지붕 색", nil)
+        for (i, c) in roofColors.enumerated() {
+            add("  " + c.name, #selector(setHouseColor(_:)), tag: i, on: i == house.color)
+        }
+        menu.addItem(.separator())
+        add("장식", nil)
+        for (i, dc) in Decor.allCases.enumerated() {
+            add("  " + dc.title, #selector(toggleDecor(_:)), tag: i, on: house.decor.contains(dc))
+        }
+        menu.addItem(.separator())
+        add("집은 끌어서 옮기고, 누르면 똑똑 노크해요", nil)
+        return menu
+    }
+
+    @objc func toggleHouse() {
+        house.shown.toggle()
+        if house.shown && shown { house.window.orderFrontRegardless() } else { house.window.orderOut(nil) }
+        // 집이 없어지면 안에 있던 다람쥐들은 밖으로
+        if !house.shown { for p in pets where p.inside { leaveHome(p, say: "어? 집이 없어졌어!") } }
+        house.save()
+    }
+
+    @objc func setHouseStyle(_ item: NSMenuItem) {
+        house.style = HouseStyle.allCases[item.tag]
+        // 둥지는 들어가는 집이 아니라 올라앉는 곳
+        for p in pets where p.inside { leaveHome(p, say: "집이 바뀌었네!") }
+        for p in pets { p.sq.nested = false }
+        house.rebuild()
+        house.save()
+    }
+
+    @objc func setHouseColor(_ item: NSMenuItem) {
+        house.color = item.tag
+        house.rebuild()
+        house.save()
+    }
+
+    @objc func toggleDecor(_ item: NSMenuItem) {
+        let dc = Decor.allCases[item.tag]
+        if house.decor.contains(dc) { house.decor.remove(dc) } else { house.decor.insert(dc) }
+        house.rebuild()
+        house.save()
+    }
+
+    // 똑똑: 안에 있으면 나오고, 없으면 가까운 다람쥐가 대답
+    func knock() {
+        if let p = pets.first(where: { $0.inside }) {
+            leaveHome(p, say: "누구세요?")
+            p.visitCheck = rnd(120, 300)
+        } else if let p = pets.min(by: { abs($0.sq.pos.x - house.x) < abs($1.sq.pos.x - house.x) }) {
+            p.sq.say(["우리 집 예쁘지?", "지금 아무도 없어~", "똑똑!"].randomElement()!, 2)
+        }
+    }
+
+    func enterHome(_ pet: Pet, for time: CGFloat) {
+        pet.inside = true
+        pet.insideTime = time
+        pet.wantsVisit = false
+        pet.goal = nil
+        pet.sq.target = nil
+        pet.window.orderOut(nil)
+    }
+
+    func leaveHome(_ pet: Pet, say line: String?) {
+        guard pet.inside else { return }
+        pet.inside = false
+        let sq = pet.sq
+        sq.pos.x = house.doorX
+        sq.land(on: nil, ground: groundY(at: house.doorX))
+        sq.dir = Bool.random() ? 1 : -1
+        if let line = line { sq.say(line, 2) }
+        if shown { pet.window.orderFrontRegardless() }
+    }
+
+    func updateHouse(_ dt: CGFloat, restack: Bool) {
+        guard house.shown else { return }
+        let home = pets.filter { $0.inside }
+        house.tick(dt, sleepers: home.filter { $0.insideTime <= 0 }.count, anyoneHome: !home.isEmpty)
+        // 둥지는 다람쥐보다 앞에 둬서 다리를 가림
+        if house.style == .nest && restack && pets.contains(where: { $0.sq.nested }) {
+            house.window.orderFrontRegardless()
+        }
     }
 
     // 바탕화면 층 <-> 모든 창 위
@@ -1723,9 +2319,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         onDesktop.toggle()
         item.state = onDesktop ? .on : .off
         refreshWindows()
-        for w in pets.map(\.window) + props {
+        house.window.level = petLevel()
+        if shown && house.shown { house.window.orderFrontRegardless() }
+        for w in pets.filter({ !$0.inside }).map(\.window) + props {
             w.level = petLevel()
-            if shown && (w !== nest.window || w.isVisible) { w.orderFrontRegardless() }
+            if shown { w.orderFrontRegardless() }
         }
     }
 
@@ -1745,16 +2343,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func giveAcorn() {
         if !shown { toggle() }
         guard let pet = pets.randomElement() else { return }
-        let b = screenBounds(for: pet.sq.pos)
-        let x = min(max(pet.sq.pos.x + rnd(-260, 260), b.minX + 90), b.maxX - 90)
+        let from = pet.inside ? CGPoint(x: house.doorX, y: groundY(at: house.doorX) + 100) : pet.sq.pos
+        let b = screenBounds(for: from)
+        let x = min(max(from.x + rnd(-260, 260), b.minX + 90), b.maxX - 90)
         acorns.append(Acorn(at: CGPoint(x: x, y: b.maxY - 40)))
     }
 
+    // 메뉴에서 바로 시작하는 마우스 잡기
+    @objc func playChase() {
+        if !shown { toggle() }
+        for p in pets {
+            if p.inside { leaveHome(p, say: nil) }
+            p.sq.nested = false
+            p.startChase()
+        }
+    }
+
     // 다람쥐마다 지금 어디로 갈지 정하고, 도착하면 할 일을 시작
-    func plan() {
+    func plan(_ dt: CGFloat) {
         let m = NSEvent.mouseLocation
         for (i, pet) in pets.enumerated() {
             let sq = pet.sq
+            if pet.inside {
+                // 자러 들어간 거면 일어날 시간까지, 놀러 들어간 거면 잠깐만. 도토리가 떨어지면 뛰쳐나옴
+                if !acorns.isEmpty {
+                    leaveHome(pet, say: "도토리 소리!")
+                } else if pet.insideTime > 0 {
+                    pet.insideTime -= dt
+                    if pet.insideTime <= 0 { leaveHome(pet, say: "다녀왔어!") }
+                } else if !sq.bedtime {
+                    leaveHome(pet, say: nil)
+                    sq.greetTime = 3.5
+                }
+                continue
+            }
             if sq.finished {
                 sq.finished = false
                 finishChore(pet)
@@ -1764,13 +2386,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 pet.goal = nil
                 continue
             }
+            // 낮에 가끔 집에 들름
+            let idle = sq.mode == .floor && sq.act == .none && !sq.sleeping
+            if house.shown && house.style != .nest && !sq.bedtime && !pet.wantsVisit && idle {
+                pet.visitCheck -= dt
+                if pet.visitCheck <= 0 {
+                    pet.visitCheck = rnd(120, 300)
+                    pet.wantsVisit = rnd(0, 1) < 0.5
+                }
+            }
+
             let b = screenBounds(for: sq.pos)
+            let shy = sq.personality == .shy
             var goal: Goal?
             var x: CGFloat = 0, rush: CGFloat = 95
             if let a = acorns.min(by: { abs($0.pos.x - sq.pos.x) < abs($1.pos.x - sq.pos.x) }) {
-                goal = .acorn(ObjectIdentifier(a)); x = a.pos.x
+                // 먹보는 도토리를 보면 전속력
+                goal = .acorn(ObjectIdentifier(a)); x = a.pos.x; rush = sq.personality == .glutton ? 150 : 95
             } else if pet.chaseTime > 0 {
-                goal = .mouse; x = m.x; rush = 170
+                // 겁쟁이는 마우스한테서 도망
+                goal = .mouse; rush = sq.personality == .playful ? 200 : 170
+                x = shy ? sq.pos.x + (sq.pos.x >= m.x ? 260 : -260) : m.x
             } else if claudeReact, claude.state == .attention, sq.mode == .floor, !sq.nested, abs(m.x - sq.pos.x) > 140 {
                 // Claude가 허락을 기다리면 마우스 쪽으로 다가가서 손 흔들기
                 goal = .approach; x = m.x; rush = 110
@@ -1783,20 +2419,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } else if world.trashed && i == 0 {
                 // 휴지통은 보통 Dock 오른쪽 끝
                 goal = .trash; x = b.maxX - 120; rush = 110
-            } else if world.night && !sq.nested {
-                goal = .nest; x = nestPos.x + [0, -26, 26, -13, 13][i % 5]; rush = 60
+            } else if house.shown && sq.bedtime && !sq.nested {
+                goal = .home; rush = 60
+                x = house.style == .nest ? house.x + [0, -26, 26, -13, 13][i % 5] : house.doorX
+            } else if house.shown && pet.wantsVisit {
+                goal = .visit; x = house.doorX; rush = 70
             }
-            x = min(max(x, b.minX + 80), b.maxX - 80)
-            if goal != nil, goal != .nest { sq.nested = false }
+            // 집은 다른 화면에 있을 수도 있으니 화면 끝에 막히지 않게
+            if goal != .home && goal != .visit { x = min(max(x, b.minX + 80), b.maxX - 80) }
+            if goal != nil, goal != .home { sq.nested = false }
 
             if goal != pet.goal {
                 pet.goal = goal
                 switch goal {
-                case .acorn?: sq.say("도토리다!")
+                case .acorn?: sq.say(sq.personality == .glutton ? "도토리!! 내 거!!" : "도토리다!")
                 case .approach?: sq.say("불렀어?")
                 case .stash?: sq.say("숨겨둔 도토리 먹어야지~", 2)
                 case .trash?: sq.say("방금 뭐 버렸어?", 2)
-                case .nest?: sq.say("졸려… 둥지 가야지", 2)
+                case .home?: sq.say(house.style == .nest ? "졸려… 둥지 가야지" : "졸려… 집에 가야지", 2)
+                case .visit?: sq.say("집에 잠깐 다녀올게~", 2)
                 default: break
                 }
             }
@@ -1822,8 +2463,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     o.goal = nil
                 }
                 pet.goal = nil
-                if needs.full {
-                    // 배부르면 나중을 위해 묻어둠
+                // 배부르면 나중을 위해 묻어둠 (먹보는 배불러도 먹음)
+                if needs.full && sq.personality != .glutton {
                     pet.chore = .bury
                     sq.startWork(1.8, "나중에 먹어야지~")
                 } else {
@@ -1831,7 +2472,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     eaten += 1
                 }
             case .mouse:
-                if dx < 40 && m.y < sq.feet + 160 {
+                if !shy && dx < 40 && m.y < sq.feet + 160 {
                     pet.endChase()
                     pet.goal = nil
                     sq.pounce(toward: m.x)
@@ -1858,15 +2499,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     pet.chore = .trash
                     sq.startWork(2.2, "뒤적뒤적…")
                 }
-            case .nest:
-                if dx < 8 {
+            case .home:
+                guard dx < 8 else { break }
+                if house.style == .nest {
                     pet.goal = nil
                     sq.target = nil
                     sq.nested = true
                     sq.sleeping = true
                     sq.targetSpeed = 0
                     sq.timer = rnd(20, 40)
+                } else {
+                    enterHome(pet, for: 0)
                 }
+            case .visit:
+                if dx < 8 { enterHome(pet, for: rnd(15, 40)) }
             case .approach, .flee:
                 break
             }
@@ -1898,7 +2544,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         needs.save()
     }
 
-    // 두 마리 이상이면 가끔 술래잡기
+    // 두 마리 이상이면 가끔 술래잡기 (장난꾸러기가 있으면 더 자주)
     func updatePlay(_ dt: CGFloat) {
         if var p = play {
             p.time -= dt
@@ -1910,25 +2556,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         playCheck -= dt
         guard playCheck <= 0 else { return }
         playCheck = rnd(25, 45)
-        guard needs.mood > 0.35, !world.night, rnd(0, 1) < 0.5 else { return }
-        let free = pets.filter {
-            $0.sq.mode == .floor && $0.sq.surface == nil && $0.sq.act == .none && $0.sq.target == nil
+        let eager = pets.contains { $0.sq.personality == .playful }
+        guard needs.mood > 0.35, !world.night, rnd(0, 1) < (eager ? 0.8 : 0.5) else { return }
+        var free = pets.filter {
+            !$0.inside && $0.sq.mode == .floor && $0.sq.surface == nil && $0.sq.act == .none && $0.sq.target == nil
                 && !$0.sq.sleeping && !$0.sq.nested
         }.shuffled()
         guard free.count >= 2 else { return }
+        // 장난꾸러기가 있으면 걔가 술래
+        free = free.filter { $0.sq.personality == .playful } + free.filter { $0.sq.personality != .playful }
         play = (free[0], free[1], 6)
         free[0].sq.say("술래잡기 하자!", 1.6)
         free[1].sq.say("잡아봐라~", 1.6)
-    }
-
-    // 둥지는 밤에만, 다람쥐보다 앞에 둬서 다리를 가림
-    func updateNest(restack: Bool) {
-        let want = world.night || pets.contains { $0.sq.nested }
-        if want != nest.window.isVisible {
-            if want { nest.window.orderFrontRegardless() } else { nest.window.orderOut(nil) }
-        } else if want && restack {
-            nest.window.orderFrontRegardless()
-        }
     }
 
     @objc func toggleSing(_ item: NSMenuItem) {
@@ -1940,15 +2579,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         shown.toggle()
         toggleItem.title = shown ? "다람쥐 숨기기" : "다람쥐 보이기"
         statusItem.button?.appearsDisabled = !shown
-        for p in pets { shown ? p.window.orderFrontRegardless() : p.window.orderOut(nil) }
-        for w in props where !(shown && w === nest.window) { shown ? w.orderFrontRegardless() : w.orderOut(nil) }
+        if shown && house.shown { house.window.orderFrontRegardless() } else { house.window.orderOut(nil) }
+        for p in pets where !p.inside { shown ? p.window.orderFrontRegardless() : p.window.orderOut(nil) }
+        for w in props { shown ? w.orderFrontRegardless() : w.orderOut(nil) }
     }
 
-    @objc func addPet() {
-        if !shown { toggle() }
+    @discardableResult
+    func spawn(name: String, personality: Personality) -> Pet {
         // 화면 위쪽에서 활강하며 등장
         let b = NSScreen.screens[0].visibleFrame
-        let pet = Pet(at: CGPoint(x: rnd(b.minX + 150, b.maxX - 150), y: b.maxY - 120))
+        let pet = Pet(at: CGPoint(x: rnd(b.minX + 150, b.maxX - 150), y: b.maxY - 120),
+                      name: name, personality: personality)
         // 그날 처음 아침에 켜면 기지개
         if pets.isEmpty && world.morning {
             let day = Calendar.current.ordinality(of: .day, in: .era, for: Date()) ?? 0
@@ -1958,10 +2599,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         pets.append(pet)
+        return pet
+    }
+
+    // 아직 없는 성격과 이름으로 새 다람쥐
+    @objc func addPet() {
+        if !shown { toggle() }
+        let used = Set(pets.map(\.sq.personality))
+        let personality = Personality.allCases.filter { !used.contains($0) }.randomElement()
+            ?? Personality.allCases.randomElement()!
+        let name = petNames.first { n in !pets.contains { $0.sq.name == n } } ?? "다람쥐 \(pets.count + 1)"
+        let pet = spawn(name: name, personality: personality)
+        pet.sq.say("안녕! 나는 \(name), \(personality.title)야", 3)
+        savePets()
     }
 
     @objc func removePet() {
+        guard pets.count > 1 else { return }
         pets.popLast()?.window.orderOut(nil)
+        savePets()
     }
 }
 
@@ -1986,6 +2642,17 @@ func snapshot(_ dir: String) {
         ("umbrella", { $0.mode = .floor; $0.speed = 45; $0.gait = 1; world.weather = .rain }),
         ("umbrellasing", { $0.mode = .floor; $0.act = .sing; $0.lyric = "♪ 라라라"; world.weather = .rain }),
     ]
+    // 집 모양마다 장식을 다 단 모습
+    let house = House()
+    for (i, style) in HouseStyle.allCases.enumerated() {
+        house.style = style
+        house.color = i
+        house.decor = Set(Decor.allCases)
+        house.rebuild()
+        let rep = NSBitmapImageRep(cgImage: house.view.image!)
+        try? rep.representation(using: .png, properties: [:])!
+            .write(to: URL(fileURLWithPath: "\(dir)/house-\(style.rawValue).png"))
+    }
     for (name, pose) in [("nest", Pose.nest), ("mound", Pose.mound)] {
         let rep = NSBitmapImageRep(cgImage: sprite(pose))
         try? rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
@@ -1993,6 +2660,7 @@ func snapshot(_ dir: String) {
     for (name, set) in poses {
         world.weather = .clear
         let s = Squirrel(); set(s)
+        s.personality = Personality.allCases[abs(name.hashValue) % Personality.allCases.count]
         let v = PetView(frame: NSRect(x: 0, y: 0, width: W * 2, height: W * 2), squirrel: s)
         v.scale = 2
         v.background = NSColor(white: 0.93, alpha: 1)
