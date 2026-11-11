@@ -2599,8 +2599,9 @@ final class OverlayView: NSView {
                 if o.kind == .ladder { o.base = surfaceBelow(x: o.pos.x, y: o.pos.y + 4, except: o.id).id }
             } else {
                 let s = surfaceBelow(x: o.pos.x, y: o.pos.y + 4)
-                label = (CGPoint(x: o.pos.x, y: o.frame.maxY + 8), reachable(from: nil, to: s.id))
+                label = (CGPoint(x: o.pos.x, y: o.pos.y + max(o.frame.height, 104) + 6), reachable(from: nil, to: s.id))
             }
+            drawUsage(c, o.kind, at: o.pos)
         } else if mapEditor.houseTool {
             let x = gridX(m.x), s = surfaceBelow(x: x, y: m.y + 4)
             if let img = mapEditor.houseGhost {
@@ -2623,8 +2624,9 @@ final class OverlayView: NSView {
                 focus = k.plat(id: 0, at: p)
                 if k == .ladder { ghostLadder = (p.x, base) }
             } else {
-                label = (CGPoint(x: p.x, y: p.y + h + 4), reachable(from: nil, to: base))
+                label = (CGPoint(x: p.x, y: p.y + max(h, 104) + 6), reachable(from: nil, to: base))
             }
+            drawUsage(c, k, at: p)
         }
 
         if let f = focus {
@@ -2672,6 +2674,179 @@ final class OverlayView: NSView {
             y += gridSize; i += 1
         }
         c.restoreGState()
+    }
+
+    // MARK: 놓기 전에 보여주는 쓰임새 (다람쥐가 어떻게 쓰는지, 얼마나 튀어 오르는지)
+
+    // 실제 다람쥐와 같은 규칙으로 날아가는 길: 처음엔 포물선, 0.35초 뒤부터 날개막을 펴고 활강
+    func flight(from: CGPoint, v: CGVector, floor: CGFloat) -> [(p: CGPoint, glide: Bool)] {
+        var p = from, vel = v, t: CGFloat = 0
+        let dir: CGFloat = v.dx >= 0 ? 1 : -1, dt: CGFloat = 1 / 60
+        var out: [(CGPoint, Bool)] = [(p, false)]
+        while t < 8 {
+            t += dt
+            vel.dy -= gravity * dt
+            if t > 0.35 {
+                if vel.dy < -glideFall { vel.dy += (-glideFall - vel.dy) * min(1, dt * 5) }
+                if abs(vel.dx) < 90 { vel.dx += dir * 200 * dt }
+                vel.dx *= 1 - min(1, dt * 0.6)
+            }
+            p.x += vel.dx * dt
+            p.y += vel.dy * dt
+            if p.y <= floor && vel.dy < 0 { out.append((CGPoint(x: p.x, y: floor), t > 0.35)); break }
+            out.append((p, t > 0.35))
+        }
+        return out
+    }
+
+    func drawPath(_ c: CGContext, _ pts: [(p: CGPoint, glide: Bool)], from base: CGFloat) {
+        guard pts.count > 1 else { return }
+        c.saveGState()
+        c.setStrokeColor(CGColor(red: 0.95, green: 0.55, blue: 0.15, alpha: 0.9))
+        c.setLineWidth(2)
+        c.setLineDash(phase: 0, lengths: [5, 4])
+        for (i, q) in pts.enumerated() {
+            let v = CGPoint(x: q.p.x - origin.x, y: q.p.y - origin.y + 14)
+            if i == 0 { c.move(to: v) } else { c.addLine(to: v) }
+        }
+        c.strokePath()
+        c.restoreGState()
+        // 잔상 다섯 개
+        for i in 1...5 {
+            let q = pts[min(pts.count - 1, pts.count * i / 5)]
+            let img = sprite(q.glide ? .glide : .side(1, false))
+            let w = CGFloat(img.width) * P * 0.55, h = CGFloat(img.height) * P * 0.55
+            let before = pts[max(0, pts.count * i / 5 - 3)].p
+            c.saveGState()
+            c.setAlpha(0.2 + 0.1 * CGFloat(i))
+            c.translateBy(x: q.p.x - origin.x, y: q.p.y - origin.y)
+            c.scaleBy(x: q.p.x >= before.x ? 1 : -1, y: 1)
+            c.draw(img, in: CGRect(x: -w / 2, y: 0, width: w, height: h))
+            c.restoreGState()
+        }
+        // 가장 높이 올라가는 곳에 높이 표시
+        if let top = pts.max(by: { $0.p.y < $1.p.y }) {
+            let h = top.p.y - base
+            let x = top.p.x - origin.x, y = top.p.y - origin.y + 14
+            c.saveGState()
+            c.setStrokeColor(CGColor(red: 0.95, green: 0.55, blue: 0.15, alpha: 0.9))
+            c.setLineWidth(1.5)
+            c.move(to: CGPoint(x: x - 26, y: y)); c.addLine(to: CGPoint(x: x + 26, y: y)); c.strokePath()
+            c.restoreGState()
+            drawNote(c, "최고 높이 \(Int((h / gridSize).rounded()))칸", at: CGPoint(x: x, y: y + 6))
+        }
+    }
+
+    // 다람쥐 유령과 말풍선
+    func drawActor(_ c: CGContext, _ pose: Pose, at p: CGPoint, say: String?, flip: Bool = false) {
+        let img = sprite(pose)
+        let w = CGFloat(img.width) * P, h = CGFloat(img.height) * P
+        c.saveGState()
+        c.setAlpha(0.75)
+        c.translateBy(x: p.x - origin.x, y: p.y - origin.y)
+        c.scaleBy(x: flip ? -1 : 1, y: 1)
+        c.draw(img, in: CGRect(x: -w / 2, y: 0, width: w, height: h))
+        c.restoreGState()
+        if let s = say { drawNote(c, s, at: CGPoint(x: p.x - origin.x, y: p.y - origin.y + h + 2)) }
+    }
+
+    func drawNote(_ c: CGContext, _ text: String, at p: CGPoint) {
+        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.boldSystemFont(ofSize: 11),
+                                                    .foregroundColor: NSColor(white: 0.2, alpha: 1)]
+        let size = (text as NSString).size(withAttributes: attrs)
+        let r = CGRect(x: (p.x - size.width / 2 - 6).rounded(), y: p.y.rounded(), width: size.width + 12, height: size.height + 4)
+        c.setFillColor(CGColor(red: 1, green: 0.98, blue: 0.92, alpha: 0.95))
+        c.addPath(CGPath(roundedRect: r, cornerWidth: 6, cornerHeight: 6, transform: nil))
+        c.fillPath()
+        (text as NSString).draw(at: CGPoint(x: r.minX + 6, y: r.minY + 2), withAttributes: attrs)
+    }
+
+    func drawUsage(_ c: CGContext, _ k: ObjKind, at p: CGPoint) {
+        let now = CACurrentMediaTime(), f = Int(now * 8) % 2
+        let size = k.size, top = p.y + size.height
+        let side = CGPoint(x: p.x + size.width / 2 + 44, y: p.y)      // 오브젝트 옆에 선 자리
+        let ground = groundY(at: p.x)
+        switch k {
+        case .trampoline:
+            drawPath(c, flight(from: p, v: CGVector(dx: 120, dy: 1150), floor: ground), from: p.y)
+        case .spring:
+            drawPath(c, flight(from: CGPoint(x: p.x, y: top), v: CGVector(dx: 110, dy: 1050), floor: ground), from: top)
+        case .cannon:
+            let dx: CGFloat = p.x < screenBounds(for: p).midX ? 520 : -520
+            drawPath(c, flight(from: p, v: CGVector(dx: dx, dy: 1350), floor: ground), from: p.y)
+            drawNote(c, "화면 넓은 쪽으로 펑!", at: CGPoint(x: p.x - origin.x, y: top - origin.y + 30))
+        case .drum:
+            drawPath(c, flight(from: CGPoint(x: p.x, y: top), v: CGVector(dx: 0, dy: 330), floor: top), from: top)
+        case .balloon:
+            // 3초 동안 두둥실 올라간 다음 놓고 활강
+            var pts: [(p: CGPoint, glide: Bool)] = (0...30).map { i in
+                let t = CGFloat(i) / 10
+                return (CGPoint(x: p.x + 22 * t, y: p.y + 110 * t), false)
+            }
+            pts += flight(from: pts.last!.p, v: CGVector(dx: 30, dy: 0), floor: ground)
+            drawPath(c, pts, from: p.y)
+        case .slide:
+            let pl = k.plat(id: 0, at: p)
+            let a = CGPoint(x: pl.maxX - 6, y: pl.y), b = CGPoint(x: p.x + size.width / 2 + 4, y: p.y)
+            let t = CGFloat(now.truncatingRemainder(dividingBy: 1.4) / 1.4)
+            drawActor(c, .side(1, false), at: CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t), say: "슈웅~!")
+        case .wheel:
+            drawActor(c, .side(f + 1, false), at: p, say: "달려라 달려~! (4~7초)")
+        case .feeder:
+            drawActor(c, .eat(f), at: side, say: "배고프면 와서 냠냠")
+        case .water:
+            drawActor(c, .eat(f), at: side, say: "꿀꺽꿀꺽~ 시원해!")
+        case .tree:
+            let t = CGFloat(now.truncatingRemainder(dividingBy: 1.6) / 1.6)
+            let img = sprite(.acorn)
+            c.saveGState()
+            c.setAlpha(0.8)
+            c.draw(img, in: CGRect(x: p.x + 20 - origin.x, y: p.y + (size.height - 30) * (1 - t * t) - origin.y,
+                                   width: CGFloat(img.width) * P, height: CGFloat(img.height) * P))
+            c.restoreGState()
+            drawNote(c, "2~4분마다 도토리가 툭", at: CGPoint(x: p.x - origin.x, y: top - origin.y + 30))
+        case .ball:
+            // 차면 굴러가는 거리
+            c.saveGState()
+            c.setStrokeColor(CGColor(red: 0.95, green: 0.55, blue: 0.15, alpha: 0.9))
+            c.setLineWidth(2)
+            c.setLineDash(phase: 0, lengths: [5, 4])
+            c.move(to: CGPoint(x: p.x - 340 - origin.x, y: p.y + 10 - origin.y))
+            c.addLine(to: CGPoint(x: p.x + 340 - origin.x, y: p.y + 10 - origin.y))
+            c.strokePath()
+            c.restoreGState()
+            drawActor(c, .side(f + 1, false), at: CGPoint(x: p.x - 40, y: p.y), say: "뻥! (이만큼 굴러가요)")
+        case .campfire: drawActor(c, .front(open: false, happy: true), at: side, say: "따뜻해~")
+        case .speaker: drawActor(c, .front(open: f == 0, happy: true), at: side, say: "노래 나오면 둠칫둠칫~ ♪")
+        case .mirror: drawActor(c, .side(0, false), at: side, say: "나 좀 귀엽네?", flip: true)
+        case .pond: drawActor(c, .side(f + 1, false), at: p, say: "첨벙첨벙!")
+        case .clock:
+            let t = Calendar.current.dateComponents([.hour, .minute], from: Date())
+            drawActor(c, .front(open: true, happy: false), at: side, say: "지금은 \(t.hour ?? 0)시 \(t.minute ?? 0)분!")
+        case .vane: drawActor(c, .front(open: true, happy: false), at: side, say: "오늘은 맑음! (날씨를 알려줘요)")
+        case .chest: drawActor(c, .front(open: true, happy: true), at: side, say: "반짝! 가끔 도토리가 나와요")
+        case .telescope: drawActor(c, .side(0, false), at: side, say: world.night ? "별이 예쁘다~" : "저~ 멀리까지 보여!", flip: true)
+        case .mailbox: drawActor(c, .think(0), at: side, say: "편지 왔나?")
+        case .flag: drawActor(c, .front(open: true, happy: true), at: side, say: "정상 정복! (공중제비)")
+        case .portal:
+            // 지금 놓으면 이어질 포털
+            let others = mapObjs.filter { $0.kind == .portal && $0 !== mapEditor.focus }
+            if let q = others.first {
+                c.saveGState()
+                c.setStrokeColor(CGColor(red: 0.6, green: 0.4, blue: 0.9, alpha: 0.9))
+                c.setLineWidth(2)
+                c.setLineDash(phase: 0, lengths: [2, 5])
+                c.move(to: CGPoint(x: p.x - origin.x, y: p.y + 24 - origin.y))
+                c.addLine(to: CGPoint(x: q.pos.x - origin.x, y: q.pos.y + 24 - origin.y))
+                c.strokePath()
+                c.restoreGState()
+                drawNote(c, "슝! 저 포털로 이어져요", at: CGPoint(x: p.x - origin.x, y: top - origin.y + 30))
+            } else {
+                drawNote(c, "하나 더 놓으면 서로 이어져요", at: CGPoint(x: p.x - origin.x, y: top - origin.y + 30))
+            }
+        case .lamp: drawNote(c, "밤이 되면 켜져요", at: CGPoint(x: p.x - origin.x, y: top - origin.y + 30))
+        default: break
+        }
     }
 
     // 점프 궤적(사다리면 타고 오르는 길)을 따라 다람쥐 잔상
@@ -4253,6 +4428,29 @@ func snapshot(_ dir: String) {
         bg.unlockFocus()
         let rep = NSBitmapImageRep(data: bg.tiffRepresentation!)!
         try? rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "\(dir)/map-tower.png"))
+    }
+    // 쓰임새 미리보기
+    mapObjs = []
+    rebuildCustomWins()
+    for (name, tool, off) in [("use-spring", ObjKind.spring, CGPoint(x: 200, y: 96)), ("use-trampoline", .trampoline, CGPoint(x: 200, y: 0)),
+                              ("use-cannon", .cannon, CGPoint(x: 120, y: 0)), ("use-wheel", .wheel, CGPoint(x: 300, y: 0)),
+                              ("use-balloon", .balloon, CGPoint(x: 200, y: 0)), ("use-feeder", .feeder, CGPoint(x: 300, y: 0))] {
+        let v = OverlayView(frame: NSRect(x: 0, y: 0, width: 900, height: 620))
+        v.origin = CGPoint(x: base.x - 100, y: base.y - 20)
+        v.mouse = CGPoint(x: base.x + off.x, y: base.y + off.y)
+        mapEditor.tool = tool
+        let bg = NSImage(size: v.bounds.size)
+        bg.lockFocus()
+        v.draw(v.bounds)
+        bg.unlockFocus()
+        let flat = NSImage(size: v.bounds.size)
+        flat.lockFocus()
+        NSColor(white: 0.93, alpha: 1).setFill()
+        v.bounds.fill()
+        bg.draw(in: v.bounds)
+        flat.unlockFocus()
+        let rep = NSBitmapImageRep(data: flat.tiffRepresentation!)!
+        try? rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
     }
     // 그림 팔레트
     mapEditor.build()
