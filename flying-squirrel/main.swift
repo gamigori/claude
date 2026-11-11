@@ -598,6 +598,12 @@ final class Squirrel {
     var jump: Jump?             // 발판으로 뛰는 중
     var keepSurface = false     // 목적지가 발판 위에 있어서 뛰어내리지 않고 걸어감
     var perch: CGFloat = 0      // 좁은 발판 위에 앉아 있은 시간
+    // 통통 튀는 느낌: +면 납작(착지), -면 길쭉(도약). 스프링처럼 출렁이다 가라앉음
+    var squash: CGFloat = 0
+    var squashVel: CGFloat = 0
+    var tilt: CGFloat = 0       // 공중에서 날아가는 방향으로 기우는 각도
+    private var lastDir: CGFloat = 1
+    func boing(_ v: CGFloat) { squash = max(-0.3, min(0.34, v)); squashVel = 0 }
     var personality = Personality.playful
     var name = ""
     // 지금이 이 다람쥐가 잘 시간인지
@@ -639,6 +645,20 @@ final class Squirrel {
             if runTime <= 0 { say("헥헥… 운동 끝!", 1.8); needs.cheer(0.08); timer = rnd(1, 2) }
         }
         speed += (targetSpeed * (tired ? 0.5 : 1) - speed) * min(1, dt * 4)
+        // 출렁임
+        squashVel += (-260 * squash - 13 * squashVel) * dt
+        squash = max(-0.35, min(0.4, squash + squashVel * dt))
+        if dir != lastDir {
+            lastDir = dir
+            if mode == .floor && abs(squash) < 0.05 { squash = 0.1 }
+        }
+        var lean: CGFloat = 0
+        if mode == .air, flipTime <= 0, jump?.kind != .climb, jump?.kind != .warp {
+            var v = vel
+            if let j = jump { v = CGVector(dx: j.v.dx, dy: j.kind == .arc ? j.v.dy - gravity * j.t : j.v.dy) }
+            lean = gliding ? -max(-0.2, min(0.2, v.dx / 1100)) : dir * max(-0.38, min(0.38, v.dy / 1500))
+        }
+        tilt += (lean - tilt) * min(1, dt * 9)
         if act != .none { sleeping = false; speed = 0 }
 
         switch mode {
@@ -732,6 +752,7 @@ final class Squirrel {
         feet = ground
         if -vel.dy > 320 {
             vel.dy = -vel.dy * 0.45     // 통통
+            boing(0.3)
             vel.dx *= 0.7
             airTime = 0
         } else {
@@ -849,6 +870,7 @@ final class Squirrel {
     }
 
     func land(on id: Int?, ground: CGFloat) {
+        if mode == .air { boing(0.26) }
         mode = .floor
         surface = id
         feet = ground
@@ -910,11 +932,13 @@ final class Squirrel {
         airTime = 0
         sleeping = false
         jump = j
+        if j.kind == .arc { boing(-0.24) }
         if j.kind == .climb { heading = up; pos.x = j.from.x }
         if j.kind == .warp { say("슝!", 1) }
     }
 
     func hop(_ v: CGVector) {
+        boing(-0.26)
         jump = nil
         mode = .air
         surface = nil
@@ -1574,6 +1598,28 @@ final class PetView: NSView {
             c.restoreGState()
             return anchor
         }
+        // 통통: 발바닥을 기준으로 찌그러지고 늘어남 + 걸을 때 콩콩 + 숨쉬기 + 공중에서 기울기
+        c.saveGState()
+        let ay: CGFloat = grounded ? baseY + 4 : W / 2
+        var sx = 1 + sq.squash * 0.6, sy = 1 - sq.squash
+        var lift: CGFloat = 0
+        if sq.mode == .floor && sq.act == .none {
+            if sq.speed > 6 {
+                lift = abs(sin(sq.gait)) * 3
+            } else {
+                let b = sq.sleeping ? 0.035 * sin(sq.time * 1.7) : 0.018 * sin(sq.time * 3.2)
+                sy *= 1 + b
+                sx *= 1 - b * 0.5
+            }
+        }
+        c.translateBy(x: W / 2, y: ay + lift)
+        if abs(sq.tilt) > 0.01 {
+            c.translateBy(x: 0, y: 36)
+            c.rotate(by: sq.tilt)
+            c.translateBy(x: 0, y: -36)
+        }
+        c.scaleBy(x: sx, y: sy)
+        c.translateBy(x: -W / 2, y: -ay)
         var anchor = drawBody()
 
         if sq.act == .dig { drawDirt(c) }
@@ -1598,8 +1644,29 @@ final class PetView: NSView {
         case .greet: drawFloating(c, "☀", at: side, sizes: 10...16)
         default: if sq.happyTime > 0 { drawFloating(c, "♥", at: side, sizes: 10...16) }
         }
-        if let text = sq.bubble ?? sq.actText { drawBubble(c, text, at: anchor) }
+        c.restoreGState()
+        if let text = sq.bubble ?? sq.actText {
+            // 말풍선은 뿅 하고 튀어나옴
+            let now = CACurrentMediaTime()
+            if text != lastText && !(sq.bubble == nil && lastWasAct) { popAt = now }
+            lastText = text
+            lastWasAct = sq.bubble == nil
+            let t = CGFloat(min(1, (now - popAt) / 0.22)), u = t - 1
+            let k = 1 + 2.7 * u * u * u + 1.7 * u * u     // 살짝 넘쳤다가 돌아옴
+            c.saveGState()
+            c.translateBy(x: anchor.x, y: anchor.y)
+            c.scaleBy(x: max(0.3, k), y: max(0.3, k))
+            c.translateBy(x: -anchor.x, y: -anchor.y)
+            drawBubble(c, text, at: anchor)
+            c.restoreGState()
+        } else {
+            lastText = nil
+        }
     }
+
+    private var lastText: String?
+    private var lastWasAct = false
+    private var popAt: CFTimeInterval = 0
 
     // 비나 눈이 오면 땅 위에서는 우산을 씀
     var showUmbrella: Bool {
@@ -2327,6 +2394,14 @@ final class ObjView: NSView {
         c.clear(bounds)
         c.interpolationQuality = .none
         let img = sprite(obj.pose)
+        // 밟히면 납작해졌다가 출렁이며 돌아옴 (창 밖으로 안 나가게 줄어들기만)
+        let t = CGFloat(CACurrentMediaTime() - obj.bumpAt)
+        if t < 0.5 {
+            let k = 1 - 0.3 * exp(-t * 7) * abs(cos(t * 20))
+            c.translateBy(x: bounds.midX, y: 0)
+            c.scaleBy(x: 1 - (1 - k) * 0.25, y: k)
+            c.translateBy(x: -bounds.midX, y: 0)
+        }
         c.draw(img, in: CGRect(x: 0, y: 0, width: CGFloat(img.width) * P, height: CGFloat(img.height) * P))
     }
 
@@ -2369,6 +2444,8 @@ final class MapObj {
     var acorns: Int { didSet { if acorns != oldValue { redraw() } } }
     var lit = false { didSet { if lit != oldValue { redraw() } } }
     var vx: CGFloat = 0         // 공이 굴러가는 속도
+    var bumpAt: CFTimeInterval = 0  // 밟히거나 놓여서 꿀렁한 때
+    func bump() { bumpAt = CACurrentMediaTime(); view.needsDisplay = true }
     var spin = 0 { didSet { if spin != oldValue { redraw() } } }
     let window: NSWindow
     let view = ObjView()
@@ -3345,6 +3422,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let o = MapObj(k, at: p)
             mapObjs.append(o)
             o.window.orderFrontRegardless()
+            o.bump()
             self.mapChanged()
         }
         mapEditor.onReset = { [unowned self] in self.resetMap() }
@@ -3947,10 +4025,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .feeder(let id):
             guard let f = mapObjs.first(where: { $0.id == id }), f.acorns > 0 else { return sq.say("비었네…", 1.4) }
             f.acorns -= 1
+            f.bump()
             sq.startEating()
             eaten += 1
         case .obj(let id):
             pet.objGoal = nil
+            if let o = mapObjs.first(where: { $0.id == id }),
+               [.spring, .drum, .ball, .chest, .pond, .wheel, .balloon, .mailbox, .water].contains(o.kind) { o.bump() }
             switch mapObjs.first(where: { $0.id == id })?.kind {
             case .slide?:
                 // 꼭대기에서 바닥까지 미끄러져 내려옴
@@ -4086,6 +4167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for t in mapObjs where (t.kind == .trampoline || t.kind == .cannon) && objPlat(t) == sq.surface
             && abs(t.pos.x - sq.pos.x) < 18 {
             pet.bounceCool = 1.2
+            t.bump()
             if t.kind == .cannon {
                 // 화면 넓은 쪽으로 펑
                 if case .obj(let id)? = pet.goal, id == t.id { pet.goal = nil; pet.objGoal = nil }
@@ -4115,6 +4197,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         for l in mapObjs where l.kind == .lamp { l.lit = world.night }
         let now = CACurrentMediaTime()
+        for o in mapObjs where now - o.bumpAt < 0.55 { o.view.needsDisplay = true }
         for f in mapObjs where f.kind == .campfire { f.spin = Int(now * 6) % 2 }
         // 공: 지나가던 다람쥐가 건드리면 굴러가고, 놓인 면 끝에서 튕김
         for b in mapObjs where b.kind == .ball {
