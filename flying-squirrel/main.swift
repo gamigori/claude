@@ -10,8 +10,15 @@
 // - 메뉴에서 도토리를 주면 달려가서 냠냠, 많이 먹으면 배불러서 졸음
 // - 마우스로 쓰다듬으면 좋아함
 // - Claude Code 훅이 ~/.squirrel/claude-state 에 남기는 상태를 보고
-//   생각 중이면 턱 괴고 고민, 다 끝나면 기뻐하고, 확인이 필요하면 폴짝폴짝
+//   생각 중이면 턱 괴고 고민, 오래 걸리면 도토리 까먹으며 기다리고, 다 끝나면 기뻐하고,
+//   허락이 필요하면 마우스 쪽으로 와서 손 흔들고, 에러면 털이 쭈뼛, 테스트 통과면 공중제비
+// - 배고픔/기분: 배고프면 시무룩, 기분 좋으면 높이 뛰어 활강. 배부를 때 받은 도토리는 묻어뒀다가 나중에 꺼내 먹음
+// - 밤(23시~6시)엔 둥지에서 자고, 그때 컴퓨터 하고 있으면 잔소리. 아침엔 기지개
+// - 마우스를 휙휙 흔들면 쫓아와서 덮침, 휴지통에 뭘 버리면 뒤적이러 감
+// - 배터리가 부족하면 기운 없음, 비나 눈이 오면 우산
+// - 여러 마리면 술래잡기, 도토리 쟁탈전, 노래할 땐 화음
 import AppKit
+import IOKit.ps
 
 let W: CGFloat = 240
 let P: CGFloat = 4              // 픽셀 하나의 크기 (pt)
@@ -210,33 +217,49 @@ let music = NowPlaying()
 // MARK: - Claude Code 상태 (훅이 남긴 파일을 읽음)
 
 final class ClaudeWatch {
-    enum State: Equatable { case idle, thinking, tool(String), done, attention }
+    enum State: Equatable { case idle, thinking, tool(String), done, attention, error, cheer }
     var state: State = .idle
-    private var since = Date.distantPast
+    private(set) var since = Date.distantPast
+    private var busySince: Date?
     private var lastMod: Date?
     private let path = NSHomeDirectory() + "/.squirrel/claude-state"
+
+    // 한 번의 요청을 1분 넘게 붙잡고 있으면 몇 분째인지
+    var busyMinutes: Int? {
+        guard let b = busySince else { return nil }
+        let t = Date().timeIntervalSince(b)
+        return t > 60 ? Int(t / 60) : nil
+    }
 
     func poll() {
         if let mod = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date,
            mod != lastMod {
             lastMod = mod
             since = mod
-            // 첫 줄: 훅 이벤트 이름, 둘째 줄: 도구 이름
+            // 첫 줄: 훅 이벤트 이름, 둘째 줄: 도구 이름, 셋째 줄: 테스트 명령이었으면 test
             let lines = ((try? String(contentsOfFile: path, encoding: .utf8)) ?? "").components(separatedBy: "\n")
             let tool = lines.count > 1 ? lines[1] : ""
+            let flag = lines.count > 2 ? lines[2] : ""
             switch lines[0] {
-            case "UserPromptSubmit", "PostToolUse": state = .thinking
+            case "UserPromptSubmit": state = .thinking; busySince = mod
+            case "PostToolUse": state = flag == "test" ? .cheer : .thinking
+            case "PostToolUseFailure": state = .error
             case "PreToolUse": state = .tool(ClaudeWatch.describe(tool))
             case "Stop": state = .done
-            case "Notification": state = .attention
+            case "Notification", "PermissionRequest": state = .attention
             default: state = .idle
+            }
+            switch state {
+            case .idle, .done: busySince = nil
+            default: if busySince == nil { busySince = mod }
             }
         }
         // 오래된 상태는 정리
         let age = Date().timeIntervalSince(since)
         switch state {
         case .done where age > 3.5, .attention where age > 20: state = .idle
-        case .thinking where age > 600, .tool where age > 600: state = .idle
+        case .error where age > 2.5, .cheer where age > 3: state = .thinking
+        case .thinking where age > 600, .tool where age > 600: state = .idle; busySince = nil
         default: break
         }
     }
@@ -257,12 +280,156 @@ final class ClaudeWatch {
 let claude = ClaudeWatch()
 var claudeReact = true
 
+// MARK: - 컨디션: 배고픔, 기분, 묻어둔 도토리 (여러 마리가 같이 씀)
+
+final class Needs {
+    var hunger: CGFloat         // 0 배부름 ~ 1 배고픔 (1시간 반이면 꽉 참)
+    var mood: CGFloat           // 0 시무룩 ~ 1 신남
+    var stash: [CGFloat]        // 묻어둔 도토리의 x
+    private var saveIn: CGFloat = 10
+    private let d = UserDefaults.standard
+
+    init() {
+        hunger = d.object(forKey: "hunger") == nil ? 0.4 : CGFloat(d.double(forKey: "hunger"))
+        mood = d.object(forKey: "mood") == nil ? 0.6 : CGFloat(d.double(forKey: "mood"))
+        stash = (d.array(forKey: "stash") as? [Double] ?? []).map { CGFloat($0) }
+        // 꺼져 있던 동안에도 배는 고파짐
+        if d.object(forKey: "needsSaved") != nil {
+            let away = CGFloat(Date().timeIntervalSince1970 - d.double(forKey: "needsSaved"))
+            hunger = min(1, hunger + max(0, away) / 5400)
+        }
+    }
+
+    var full: Bool { hunger < 0.12 }
+    var hungry: Bool { hunger > 0.65 }
+
+    func tick(_ dt: CGFloat) {
+        hunger = min(1, hunger + dt / 5400)
+        // 배고프면 기분이 처지고, 아니면 천천히 보통으로 돌아옴
+        let rest = 0.6 - hunger * 0.5
+        mood += (rest - mood) * min(1, dt / 900)
+        saveIn -= dt
+        if saveIn <= 0 { save() }
+    }
+
+    func ate() { hunger = max(0, hunger - 0.3); cheer(0.15) }
+    func cheer(_ v: CGFloat) { mood = min(1, mood + v) }
+
+    func save() {
+        saveIn = 10
+        d.set(Double(hunger), forKey: "hunger")
+        d.set(Double(mood), forKey: "mood")
+        d.set(stash.map(Double.init), forKey: "stash")
+        d.set(Date().timeIntervalSince1970, forKey: "needsSaved")
+    }
+}
+
+let needs = Needs()
+
+// MARK: - 바깥 세상: 시간, 배터리, 날씨, 휴지통
+
+var weatherReact = true
+
+final class World {
+    enum Weather { case clear, rain, snow }
+    var battery: Int?           // 배터리가 없는 맥이면 nil
+    var charging = false
+    var weather = Weather.clear
+    var trashed = false         // 방금 휴지통에 뭔가 버림 (다람쥐가 구경 가면 false)
+    var news: String?           // 다람쥐 한 마리가 말해줄 소식
+    private var trashCount: Int?
+    private var trashBusy = false, trashDenied = false
+    private var batteryPoll: CGFloat = 0, weatherPoll: CGFloat = 3, trashPoll: CGFloat = 2
+
+    var hour: Int { Calendar.current.component(.hour, from: Date()) }
+    var night: Bool { hour >= 23 || hour < 6 }
+    var morning: Bool { hour >= 6 && hour < 11 }
+    var lowBattery: Bool { !charging && (battery ?? 100) <= 20 }
+
+    func tick(_ dt: CGFloat) {
+        batteryPoll -= dt; weatherPoll -= dt; trashPoll -= dt
+        if batteryPoll <= 0 { batteryPoll = 20; pollBattery() }
+        if weatherPoll <= 0 { weatherPoll = 1800; pollWeather() }
+        if trashPoll <= 0 { trashPoll = 3; pollTrash() }
+    }
+
+    func pollBattery() {
+        let info = IOPSCopyPowerSourcesInfo().takeRetainedValue()
+        let list = IOPSCopyPowerSourcesList(info).takeRetainedValue() as [CFTypeRef]
+        guard let ps = list.first,
+              let desc = IOPSGetPowerSourceDescription(info, ps)?.takeUnretainedValue() as? [String: Any],
+              let level = desc[kIOPSCurrentCapacityKey] as? Int else { battery = nil; return }
+        let plugged = (desc[kIOPSPowerSourceStateKey] as? String) == kIOPSACPowerValue
+        if battery != nil {
+            if plugged && !charging { news = "충전이다! ⚡" }
+            if !plugged && level <= 20 && (battery! > 20 || charging) { news = "배터리가 부족해… 🪫" }
+        }
+        battery = level
+        charging = plugged
+    }
+
+    // wttr.in 이 IP로 대충 위치를 잡아서 지금 날씨를 알려줌
+    func pollWeather() {
+        guard weatherReact else { weather = .clear; return }
+        var r = URLRequest(url: URL(string: "https://wttr.in/?format=j1")!)
+        r.setValue("DesktopFlyingSquirrel/1.0", forHTTPHeaderField: "User-Agent")
+        r.timeoutInterval = 15
+        URLSession.shared.dataTask(with: r) { data, _, _ in
+            guard let data = data,
+                  let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let cur = (j["current_condition"] as? [[String: Any]])?.first,
+                  let code = Int(cur["weatherCode"] as? String ?? "") else { return }
+            let w: Weather = World.snowCodes.contains(code) ? .snow : World.rainCodes.contains(code) ? .rain : .clear
+            DispatchQueue.main.async {
+                guard weatherReact else { return }
+                if w != self.weather && w != .clear { self.news = w == .rain ? "비 온다~ ☔" : "눈이다! ❄" }
+                self.weather = w
+            }
+        }.resume()
+    }
+
+    static let rainCodes: Set<Int> = [176, 200, 263, 266, 281, 284, 293, 296, 299, 302, 305, 308, 311, 314,
+                                      353, 356, 359, 386, 389]
+    static let snowCodes: Set<Int> = [179, 182, 185, 227, 230, 317, 320, 323, 326, 329, 332, 335, 338, 350,
+                                      362, 365, 368, 371, 374, 377, 392, 395]
+
+    // 휴지통 폴더는 직접 못 읽어서 Finder에게 개수를 물어봄 (처음 한 번 권한을 물어봄)
+    func pollTrash() {
+        guard !trashBusy, !trashDenied else { return }
+        trashBusy = true
+        DispatchQueue.global().async {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            p.arguments = ["-e", "tell application \"Finder\" to count items of trash"]
+            let out = Pipe()
+            p.standardOutput = out
+            p.standardError = Pipe()
+            var n: Int?
+            if (try? p.run()) != nil {
+                p.waitUntilExit()
+                n = Int(String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                    .trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            DispatchQueue.main.async {
+                self.trashBusy = false
+                guard let n = n else { self.trashDenied = true; return }
+                if let old = self.trashCount, n > old { self.trashed = true }
+                self.trashCount = n
+            }
+        }
+    }
+}
+
+let world = World()
+
 // MARK: - 하늘다람쥐
 
 enum Mode { case wall, floor, air, held }
 
-// 멈춰서 앞을 보고 하는 행동
-enum Act: Equatable { case none, sing, think(String), done, attention, eat }
+// 멈춰서 하는 행동
+enum Act: Equatable {
+    case none, sing, harmony, think(String), wait(Int), done, cheer, attention, startle, eat, dig, greet
+}
 
 final class Squirrel {
     var pos = CGPoint.zero      // 창 중심 (화면 좌표)
@@ -279,10 +446,17 @@ final class Squirrel {
     var sleeping = false
     var act: Act = .none
     var lyric: String?
-    var target: CGFloat?        // 쫓아가는 도토리의 x
+    var target: CGFloat?        // 가려는 곳의 x (도토리, 둥지, 마우스 등)
+    var rush: CGFloat = 95      // 거기로 가는 속도
     var eatTime: CGFloat = 0
+    var workTime: CGFloat = 0   // 땅 파기, 뒤적이기 남은 시간
+    var finished = false        // 일이 막 끝남
     var happyTime: CGFloat = 0
-    var meals: [CGFloat] = []   // 최근에 먹은 시각
+    var flipTime: CGFloat = 0   // 공중제비 남은 시간
+    var greetTime: CGFloat = 0
+    var nested = false          // 둥지에서 자는 중
+    var tired = false           // 배터리가 없거나 너무 배고파서 기운 없음
+    var lively: CGFloat = 0.5   // 기분
     var bubble: String?
     var bubbleTime: CGFloat = 0
     var time: CGFloat = 0
@@ -306,7 +480,13 @@ final class Squirrel {
             eatTime -= dt
             if eatTime <= 0 { doneEating() }
         }
-        speed += (targetSpeed - speed) * min(1, dt * 4)
+        if workTime > 0 {
+            workTime -= dt
+            if workTime <= 0 { finished = true }
+        }
+        if flipTime > 0 { flipTime -= dt }
+        if greetTime > 0 { greetTime -= dt }
+        speed += (targetSpeed * (tired ? 0.5 : 1) - speed) * min(1, dt * 4)
         if act != .none { sleeping = false; speed = 0 }
 
         switch mode {
@@ -397,7 +577,7 @@ final class Squirrel {
             if surface != nil { return fall() }
             sleeping = false
             dir = tx > pos.x ? 1 : -1
-            targetSpeed = abs(tx - pos.x) < 6 ? 0 : 95
+            targetSpeed = abs(tx - pos.x) < 6 ? 0 : rush
         } else if act == .none {
             timer -= dt
             if timer <= 0 { pickFloor() }
@@ -429,7 +609,9 @@ final class Squirrel {
     // 쉬는 중이면 가끔 졸기
     func rest() {
         targetSpeed = 0
-        if rnd(0, 1) < 0.35 {
+        // 기운 없으면 자주, 신나 있으면 덜 졺
+        let sleepy = tired ? 0.7 : 0.35 - (lively - 0.5) * 0.3
+        if rnd(0, 1) < sleepy {
             sleeping = true; timer = rnd(6, 14)
         } else {
             timer = rnd(1, 3)
@@ -450,7 +632,23 @@ final class Squirrel {
     }
 
     func pickFloor() {
+        if nested {
+            // 밤새 둥지에서 자고, 아침이 되면 기지개
+            if world.night { sleeping = true; timer = rnd(20, 40); return }
+            nested = false
+            greetTime = 3.5
+        }
         sleeping = false
+        if tired && rnd(0, 1) < 0.25 {
+            say(world.lowBattery ? "배터리가… 부족해…" : "배고파… 힘없어…", 2.2)
+        } else if needs.hungry && rnd(0, 1) < 0.2 {
+            say(["배고파…", "도토리 줘~", "꼬르륵…"].randomElement()!, 2)
+        }
+        // 기분 좋으면 가끔 높이 뛰어올라 활강
+        if lively > 0.7 && !tired && surface == nil && rnd(0, 1) < 0.12 {
+            say("야호~!", 1.2)
+            return hop(CGVector(dx: dir * 160, dy: 760))
+        }
         let r = rnd(0, 1)
         if r < 0.25 {
             rest()
@@ -505,18 +703,39 @@ final class Squirrel {
     func poke() {
         if sleeping {
             sleeping = false
+            nested = false
             say("깜짝!")
             timer = rnd(1, 2)
         } else {
             say(["안녕!", "도토리 줘!", "간지러워!", "뭐야?", "♥", "히히", "날아볼까?"].randomElement()!)
         }
         // 바닥에 있으면 폴짝
-        if mode == .floor {
-            mode = .air
-            surface = nil
-            airTime = 0
-            vel = CGVector(dx: 0, dy: 420)
-        }
+        if mode == .floor { hop(CGVector(dx: 0, dy: 420)) }
+    }
+
+    func hop(_ v: CGVector) {
+        mode = .air
+        surface = nil
+        airTime = 0
+        sleeping = false
+        vel = v
+    }
+
+    // 테스트 통과! 제자리에서 공중제비
+    func flip() {
+        guard mode == .floor else { return }
+        hop(CGVector(dx: 0, dy: 640))
+        flipTime = 0.7
+        happyTime = 2.5
+    }
+
+    // 마우스 커서를 덮침
+    func pounce(toward x: CGFloat) {
+        dir = x > pos.x ? 1 : -1
+        hop(CGVector(dx: dir * 260, dy: 560))
+        say("잡았다!", 1.4)
+        happyTime = 2
+        needs.cheer(0.05)
     }
 
     func startEating() {
@@ -526,10 +745,9 @@ final class Squirrel {
     }
 
     func doneEating() {
-        meals = meals.filter { time - $0 < 180 } + [time]
+        needs.ate()
         timer = rnd(1, 2)
-        if meals.count >= 3 {
-            meals = []
+        if needs.full {
             say("배불러~", 2.5)
             sleeping = true
             timer = 12
@@ -539,9 +757,19 @@ final class Squirrel {
         }
     }
 
+    // 땅 파기, 뒤적이기
+    func startWork(_ t: CGFloat, _ s: String) {
+        target = nil
+        sleeping = false
+        workTime = t
+        finished = false
+        say(s, t)
+    }
+
     // 쓰다듬어 줬을 때
     func petted() {
         happyTime = 2
+        needs.cheer(0.1)
         say(sleeping ? "음냐..." : ["헤헤 ♥", "기분 좋아~", "더 해줘!"].randomElement()!)
     }
 
@@ -552,8 +780,10 @@ final class Squirrel {
     }
 
     // 가사가 나오는 동안 입을 뻐끔뻐끔, 간주 중엔 입 다물고 흥얼
+    // 화음 넣는 다람쥐는 반 박자 엇갈려서
     var mouthOpen: Bool {
-        lyric != nil && (time * 3.5).truncatingRemainder(dividingBy: 1) < 0.55
+        let beat = time * 3.5 + (act == .harmony ? 0.5 : 0)
+        return lyric != nil && beat.truncatingRemainder(dividingBy: 1) < 0.55
     }
     // 가끔 눈을 감고 신나게
     var happyEyes: Bool { Int(time / 2.5) % 3 == 2 }
@@ -562,7 +792,8 @@ final class Squirrel {
     var bob: CGFloat {
         switch act {
         case .sing: return Int(time * 4) % 2 == 0 ? P : 0
-        case .done: return Int(time * 5) % 2 == 0 ? P * 3 : 0
+        case .harmony: return Int(time * 4) % 2 == 1 ? P : 0
+        case .done, .cheer, .greet: return Int(time * 5) % 2 == 0 ? P * 3 : 0
         case .attention: return Int(time * 6) % 2 == 0 ? P * 2 : 0
         default: return 0
         }
@@ -571,10 +802,14 @@ final class Squirrel {
     // 하는 행동에 맞는 말풍선
     var actText: String? {
         switch act {
-        case .sing: return lyric
+        case .sing, .harmony: return lyric
         case .think(let what): return what + String(repeating: ".", count: Int(time * 2.5) % 3 + 1)
+        case .wait(let m): return "아직 하는 중… (\(m)분째)"
         case .done: return "다 했다!"
+        case .cheer: return "테스트 통과!"
+        case .startle: return "으악! 에러다!"
         case .attention: return "확인해줘!"
+        case .greet: return world.morning ? "으아암~ 좋은 아침!" : "으아암~ 잘 잤다!"
         default: return nil
         }
     }
@@ -600,6 +835,46 @@ let palette: [Character: (UInt8, UInt8, UInt8)] = [
     "a": (130, 84, 48),     // 도토리 모자
     "b": (214, 150, 86),    // 도토리
     "l": (246, 200, 146),   // 도토리 반짝
+    "t": (150, 100, 60),    // 둥지 나뭇가지
+    "y": (214, 176, 108),   // 둥지 지푸라기
+    "u": (156, 118, 84),    // 흙
+    "v": (120, 88, 62),     // 진한 흙
+    "r": (236, 108, 108),   // 우산
+    "R": (252, 236, 220),   // 우산 줄무늬
+]
+
+// 둥지 (밤에만 나타남, 다람쥐 다리를 가림)
+let nestBody = [
+    "t..y..t...y..t...y..t..y...t..y.",
+    "yttyty.tttyy.tyttyt.yyttyt.tytyt",
+    "tyttyttytyyttytytyyttyttytyttyyt",
+    ".tytttyytyttyttyttytyyttytttyyt.",
+    "..ttyttytyyttyttytytyttyttytyt..",
+    "....ttttyyttttyyttttyyttttyy....",
+]
+
+// 도토리를 묻어둔 흙더미
+let moundBody = [
+    "....aa.....",
+    "..uuaauuu..",
+    ".uuvuuuvuu.",
+    "uuuuuvuuuuu",
+]
+
+// 비 오는 날 쓰는 우산
+let umbrellaBody = [
+    "........o........",
+    "......rrRrr......",
+    "....rrrrRrrrr....",
+    "..rrrrrRRRrrrrr..",
+    ".rrrrrrRRRrrrrrr.",
+    "rrrrrrRRRRRrrrrrr",
+    "r.r.r.r.o.r.r.r.r",
+    "........o........",
+    "........o........",
+    "........o........",
+    "......o.o........",
+    ".......o.........",
 ]
 
 let acornBody = [
@@ -853,8 +1128,38 @@ func eatSprite(frame: Int) -> CGImage {
     return finish(g, sleep: false)
 }
 
+// 한 손을 번쩍 들고 흔들기 (Claude가 불러요)
+func waveSprite(frame: Int) -> CGImage {
+    var g: Grid = frontBody.map(Array.init)
+    for (x, y) in [(8, 10), (9, 10), (8, 11), (9, 11)] { g[y][x] = "w" }
+    for (x, y) in [(10, 8), (11, 8), (10, 9), (11, 9)] { g[y][x] = "m" }
+    let arm: [(Int, Int)] = frame == 0 ? [(3, 9), (3, 8), (2, 7), (2, 6)] : [(3, 9), (2, 8), (1, 7)]
+    let paw: [(Int, Int)] = frame == 0 ? [(1, 4), (2, 4), (1, 5), (2, 5)] : [(0, 5), (1, 5), (0, 6), (1, 6)]
+    for (x, y) in arm { g[y][x] = "g" }
+    for (x, y) in paw { g[y][x] = "f" }
+    return finish(g, sleep: false)
+}
+
+// 깜짝 놀라서 털이 쭈뼛, 눈이 동그래짐 (에러!)
+func startleSprite() -> CGImage {
+    var g: Grid = frontBody.map(Array.init)
+    // 동그란 눈: 흰자 가운데 작은 눈동자
+    for y in 4...7 { for x in 4...17 where g[y][x] == "k" || g[y][x] == "h" { g[y][x] = "h" } }
+    for (x, y) in [(6, 6), (7, 6), (14, 6), (15, 6), (6, 5), (14, 5)] { g[y][x] = "k" }
+    for (x, y) in [(10, 8), (11, 8), (10, 9), (11, 9)] { g[y][x] = "m" }
+    // 테두리 털을 한 칸씩 삐죽삐죽
+    let src = g
+    for y in stride(from: 3, to: src.count - 1, by: 2) {
+        if let l = src[y].firstIndex(where: { $0 != "." }), l > 0 { g[y][l - 1] = "g" }
+        if let r = src[y].lastIndex(where: { $0 != "." }), r < src[y].count - 1 { g[y][r + 1] = "g" }
+    }
+    for x in [7, 10, 11, 14] where g[1][x] == "." { g[1][x] = "g" }
+    return finish(g, sleep: false)
+}
+
 enum Pose: Hashable {
     case climb(Int, Bool), side(Int, Bool), front(open: Bool, happy: Bool), think(Int), eat(Int), glide, acorn
+    case wave(Int), startle, nest, mound, umbrella
 }
 
 var spriteCache: [Pose: CGImage] = [:]
@@ -869,6 +1174,11 @@ func sprite(_ pose: Pose) -> CGImage {
     case .eat(let f): s = eatSprite(frame: f)
     case .glide: s = finish(glideBody.map(Array.init), sleep: false)
     case .acorn: s = finish(acornBody.map(Array.init), sleep: false)
+    case .wave(let f): s = waveSprite(frame: f)
+    case .startle: s = startleSprite()
+    case .nest: s = finish(nestBody.map(Array.init), sleep: false)
+    case .mound: s = finish(moundBody.map(Array.init), sleep: false)
+    case .umbrella: s = finish(umbrellaBody.map(Array.init), sleep: false)
     }
     spriteCache[pose] = s
     return s
@@ -927,13 +1237,18 @@ final class PetView: NSView {
     var pose: Pose {
         switch sq.mode {
         case .held: return .glide
+        case .air where sq.flipTime > 0: return .front(open: true, happy: true)
         case .air: return sq.gliding ? .glide : .side(sq.frame, false)
         case _ where sq.act != .none:
             switch sq.act {
             case .think: return .think(Int(sq.time / 1.6) % 3 == 2 ? 1 : 0)
+            // 오래 걸리면 고민하다가 도토리 까먹다가
+            case .wait: return Int(sq.time / 3) % 2 == 0 ? .eat(Int(sq.time * 5) % 2) : .think(0)
             case .eat: return .eat(Int(sq.time * 5) % 2)
-            case .done: return .front(open: true, happy: true)
-            case .attention: return .front(open: Int(sq.time * 4) % 2 == 0, happy: false)
+            case .dig: return .side(Int(sq.time * 10) % 2 + 1, false)
+            case .done, .cheer, .greet: return .front(open: true, happy: true)
+            case .attention: return .wave(Int(sq.time * 5) % 2)
+            case .startle: return .startle
             default: return .front(open: sq.mouthOpen, happy: sq.happyEyes)
             }
         case .wall: return .climb(sq.frame, sq.sleeping)
@@ -955,44 +1270,85 @@ final class PetView: NSView {
         // 바닥 위에 서 있으면 발이 y=8, 벽이나 손에 있으면 창 가운데
         let grounded = sq.mode == .floor || sq.mode == .air
         let baseY: CGFloat = grounded ? 4 : (W / 2 - h / 2).rounded()
-        var anchor: CGPoint
-        c.saveGState()
-        switch pose {
-        case .climb:
-            // 90도 단위로만 돌려서 픽셀이 깨지지 않게
-            let q = (sq.heading / up).rounded()
-            c.translateBy(x: W / 2, y: W / 2)
-            c.rotate(by: (q - 1) * up)
-            c.draw(img, in: CGRect(x: -w / 2, y: -h / 2, width: w, height: h))
-            anchor = CGPoint(x: W / 2, y: W / 2 + 52)
-        case .side:
-            c.translateBy(x: W / 2, y: 0)
-            c.scaleBy(x: sq.dir, y: 1)
-            c.draw(img, in: CGRect(x: -52, y: baseY, width: w, height: h))
-            anchor = CGPoint(x: W / 2 + sq.dir * 28, y: baseY + h + 2)
-        case .front, .think, .eat:
-            // 노래 박자에 맞춰 통통, 기쁘면 폴짝
-            c.draw(img, in: CGRect(x: W / 2 - 46, y: baseY + sq.bob, width: w, height: h))
-            anchor = CGPoint(x: W / 2 - 4, y: baseY + h + 6)
-        case .glide:
-            let wiggle: CGFloat = sq.mode == .held && Int(sq.time * 8) % 2 == 0 ? P : 0
-            c.draw(img, in: CGRect(x: W / 2 - w / 2, y: baseY + wiggle, width: w, height: h))
-            anchor = CGPoint(x: W / 2, y: baseY + h + 2)
-        case .acorn:
-            anchor = .zero
+        func drawBody() -> CGPoint {
+            var anchor: CGPoint
+            c.saveGState()
+            switch pose {
+            case .climb:
+                // 90도 단위로만 돌려서 픽셀이 깨지지 않게
+                let q = (sq.heading / up).rounded()
+                c.translateBy(x: W / 2, y: W / 2)
+                c.rotate(by: (q - 1) * up)
+                c.draw(img, in: CGRect(x: -w / 2, y: -h / 2, width: w, height: h))
+                anchor = CGPoint(x: W / 2, y: W / 2 + 52)
+            case .side:
+                c.translateBy(x: W / 2, y: 0)
+                c.scaleBy(x: sq.dir, y: 1)
+                c.draw(img, in: CGRect(x: -52, y: baseY, width: w, height: h))
+                anchor = CGPoint(x: W / 2 + sq.dir * 28, y: baseY + h + 2)
+            case .front where sq.flipTime > 0:
+                // 공중제비: 90도씩 한 바퀴
+                let q = CGFloat(Int((0.7 - sq.flipTime) / 0.7 * 4) % 4)
+                c.translateBy(x: W / 2 - 46 + w / 2, y: baseY + h / 2)
+                c.rotate(by: -q * up)
+                c.draw(img, in: CGRect(x: -w / 2, y: -h / 2, width: w, height: h))
+                anchor = CGPoint(x: W / 2 - 4, y: baseY + h + 6)
+            case .front, .think, .eat, .wave, .startle:
+                // 노래 박자에 맞춰 통통, 기쁘면 폴짝, 놀라면 부들부들
+                let shake: CGFloat = sq.act == .startle ? (Int(sq.time * 30) % 2 == 0 ? P : -P) : 0
+                c.draw(img, in: CGRect(x: W / 2 - 46 + shake, y: baseY + sq.bob, width: w, height: h))
+                anchor = CGPoint(x: W / 2 - 4, y: baseY + h + 6)
+            case .glide:
+                let wiggle: CGFloat = sq.mode == .held && Int(sq.time * 8) % 2 == 0 ? P : 0
+                c.draw(img, in: CGRect(x: W / 2 - w / 2, y: baseY + wiggle, width: w, height: h))
+                anchor = CGPoint(x: W / 2, y: baseY + h + 2)
+            default:
+                anchor = .zero
+            }
+            c.restoreGState()
+            return anchor
         }
-        c.restoreGState()
+        var anchor = drawBody()
+
+        if sq.act == .dig { drawDirt(c) }
+        if showUmbrella {
+            // 머리 옆 뒤쪽으로 우산을 들고, 몸을 한 번 더 그려서 손잡이가 머리 뒤로 숨게
+            let u = sprite(.umbrella)
+            let uw = CGFloat(u.width) * P, uh = CGFloat(u.height) * P
+            var cx = anchor.x + 14
+            if case .side = pose { cx = anchor.x - sq.dir * 14 }
+            c.draw(u, in: CGRect(x: (cx - uw / 2).rounded(), y: anchor.y - 22, width: uw, height: uh))
+            _ = drawBody()
+            anchor.y += uh - 22
+        }
 
         if sq.sleeping { drawFloating(c, "z", at: anchor, sizes: 9...17) }
         let side = CGPoint(x: anchor.x + 22, y: anchor.y - 10)
         switch sq.act {
-        case .sing: drawFloating(c, "♪", at: side, sizes: 11...17)
-        case .think: drawFloating(c, "?", at: side, sizes: 10...16)
-        case .attention: drawFloating(c, "!", at: side, sizes: 12...18)
-        case .done: drawFloating(c, "♥", at: side, sizes: 10...16)
+        case .sing, .harmony: drawFloating(c, "♪", at: side, sizes: 11...17)
+        case .think, .wait: drawFloating(c, "?", at: side, sizes: 10...16)
+        case .attention, .startle: drawFloating(c, "!", at: side, sizes: 12...18)
+        case .done, .cheer: drawFloating(c, "♥", at: side, sizes: 10...16)
+        case .greet: drawFloating(c, "☀", at: side, sizes: 10...16)
         default: if sq.happyTime > 0 { drawFloating(c, "♥", at: side, sizes: 10...16) }
         }
         if let text = sq.bubble ?? sq.actText { drawBubble(c, text, at: anchor) }
+    }
+
+    // 비나 눈이 오면 땅 위에서는 우산을 씀
+    var showUmbrella: Bool {
+        weatherReact && world.weather != .clear && sq.mode == .floor && !sq.nested
+    }
+
+    // 땅 팔 때 뒤로 튀는 흙
+    func drawDirt(_ c: CGContext) {
+        c.setFillColor(CGColor(red: 156 / 255, green: 118 / 255, blue: 84 / 255, alpha: 1))
+        for i in 0..<5 {
+            let t = (sq.time * 2.2 + CGFloat(i) / 5).truncatingRemainder(dividingBy: 1)
+            let x = W / 2 - sq.dir * (10 + t * 46)
+            let y = 6 + sin(t * .pi) * 30
+            c.fill(CGRect(x: x.rounded(), y: y.rounded(), width: P, height: P))
+        }
     }
 
     // 머리 위로 떠오르는 Zzz, ♪
@@ -1040,37 +1396,64 @@ final class PetView: NSView {
 
 // MARK: - 창 / 앱
 
-final class AcornView: NSView {
+final class SpriteView: NSView {
+    let pose: Pose
+    init(_ pose: Pose, size: NSSize) {
+        self.pose = pose
+        super.init(frame: NSRect(origin: .zero, size: size))
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
     override var isOpaque: Bool { false }
     override func draw(_ dirtyRect: NSRect) {
         guard let c = NSGraphicsContext.current?.cgContext else { return }
         c.clear(bounds)
         c.interpolationQuality = .none
-        let img = sprite(.acorn)
+        let img = sprite(pose)
         c.draw(img, in: CGRect(x: 0, y: 0, width: CGFloat(img.width) * P, height: CGFloat(img.height) * P))
     }
 }
 
-// 하늘에서 떨어지는 도토리
-final class Acorn {
-    var pos: CGPoint            // 바닥에 닿는 아래 가운데
-    var vy: CGFloat = 0
-    var landed = false
+// 바탕화면에 놓이는 작은 그림 (도토리, 흙더미, 둥지). pos는 바닥에 닿는 아래 가운데
+class Prop {
+    var pos: CGPoint
     let window: NSWindow
+    let size: NSSize
 
-    init(at p: CGPoint) {
+    init(_ pose: Pose, at p: CGPoint, show: Bool = true) {
         pos = p
-        let size = NSRect(x: 0, y: 0, width: 36, height: 36)
-        window = NSWindow(contentRect: size, styleMask: .borderless, backing: .buffered, defer: false)
+        let img = sprite(pose)
+        size = NSSize(width: CGFloat(img.width) * P, height: CGFloat(img.height) * P)
+        window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: .borderless,
+                          backing: .buffered, defer: false)
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = false
         window.ignoresMouseEvents = true
         window.level = petLevel()
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
-        window.contentView = AcornView(frame: size)
-        window.orderFrontRegardless()
+        window.contentView = SpriteView(pose, size: size)
+        place()
+        if show { window.orderFrontRegardless() }
     }
+
+    func place() {
+        window.setFrameOrigin(NSPoint(x: pos.x.rounded() - size.width / 2, y: pos.y.rounded() - 4))
+    }
+}
+
+// 화면 바닥 높이 (x가 속한 화면)
+func groundY(at x: CGFloat) -> CGFloat {
+    let s = NSScreen.screens.first { $0.frame.minX <= x && x < $0.frame.maxX } ?? NSScreen.screens[0]
+    return s.visibleFrame.minY
+}
+
+// 하늘에서 떨어지는 도토리
+final class Acorn: Prop {
+    var vy: CGFloat = 0
+    var landed = false
+
+    init(at p: CGPoint) { super.init(.acorn, at: p) }
 
     func tick(_ dt: CGFloat) {
         if !landed {
@@ -1082,14 +1465,29 @@ final class Acorn {
                 if -vy > 300 { vy = -vy * 0.35 } else { landed = true; vy = 0 }
             }
         }
-        window.setFrameOrigin(NSPoint(x: pos.x.rounded() - 18, y: pos.y.rounded() - 4))
+        place()
     }
 }
+
+// 다람쥐가 가려는 곳
+enum Goal: Equatable { case acorn(ObjectIdentifier), mouse, approach, tag, flee, stash(CGFloat), trash, nest }
+// 도착해서 하는 일
+enum Chore { case bury, unbury(CGFloat), trash }
 
 final class Pet {
     let sq = Squirrel()
     let view: PetView
     let window: NSWindow
+    var index = 0
+    var goal: Goal?
+    var chore: Chore?
+    var claimed: ObjectIdentifier?  // "내꺼야!" 하고 외친 도토리
+    var chaseTime: CGFloat = 0
+    private var chaseCool: CGFloat = 0
+    private var calm: CGFloat = 0
+    private var mouseSpeed: CGFloat = 0
+    private var nag: CGFloat = 20
+    private var lastFlip = Date.distantPast
 
     init(at p: CGPoint) {
         sq.pos = p
@@ -1114,8 +1512,22 @@ final class Pet {
             window.level = petLevel()
             window.orderFrontRegardless()
         }
+        sq.tired = world.lowBattery || needs.hunger > 0.85
+        sq.lively = needs.mood
         sq.act = currentAct()
-        sq.lyric = sq.act == .sing ? music.currentLine : nil
+        switch sq.act {
+        case .sing: sq.lyric = music.currentLine
+        case .harmony:
+            // 가사가 나올 때 옆에서 화음
+            let hum = ["♪ 우~ 우우~", "♪ 라~ 라라~", "♪ 음~ 음음~"][Int(sq.time / 4) % 3]
+            sq.lyric = music.currentLine == nil ? nil : hum
+        default: sq.lyric = nil
+        }
+        // 테스트가 통과하면 한 번 공중제비
+        if sq.act == .cheer, claude.since != lastFlip {
+            lastFlip = claude.since
+            sq.flip()
+        }
         sq.update(dt, bounds: screenBounds(for: sq.pos))
         window.setFrameOrigin(NSPoint(x: sq.pos.x.rounded() - W / 2, y: sq.pos.y.rounded() - W / 2))
         view.needsDisplay = true
@@ -1126,44 +1538,92 @@ final class Pet {
         window.ignoresMouseEvents = !view.dragging && dist > 50
 
         // 마우스로 살살 문지르면 쓰다듬기
+        let moved = hypot(m.x - lastMouse.x, m.y - lastMouse.y)
         if dist < 45 && !view.dragging {
-            rub += hypot(m.x - lastMouse.x, m.y - lastMouse.y)
+            rub += moved
         } else {
             rub = max(0, rub - dt * 300)
         }
-        lastMouse = m
         if rub > 700 { rub = 0; sq.petted() }
+        watchMouse(m, moved: moved, dt)
+        lastMouse = m
     }
 
     private var rub: CGFloat = 0
     private var lastMouse = CGPoint.zero
 
-    // 우선순위: 먹기 > 도토리 쫓기 > Claude 반응 > 노래
+    // 마우스를 휙휙 흔들면 쫓아가서 덮침
+    private func watchMouse(_ m: CGPoint, moved: CGFloat, _ dt: CGFloat) {
+        mouseSpeed += (moved / max(dt, 0.001) - mouseSpeed) * min(1, dt * 8)
+        if chaseTime > 0 {
+            chaseTime -= dt
+            calm = mouseSpeed < 150 ? calm + dt : 0
+            if calm > 1.5 { chaseTime = 0; sq.say("어디 갔지?") }
+            if chaseTime <= 0 { chaseCool = 8 }
+        } else {
+            chaseCool -= dt
+            let free = sq.act == .none || sq.act == .sing || sq.act == .harmony
+            if chaseCool <= 0, mouseSpeed > 2000, free, sq.mode == .floor, sq.target == nil, !sq.nested,
+               abs(m.x - sq.pos.x) < 600, m.y < sq.pos.y + 500 {
+                chaseTime = 5
+                calm = 0
+                sq.say("잡을 거야!", 1.2)
+            }
+        }
+        // 둥지에서 자는데 아직 컴퓨터를 하고 있으면 잔소리
+        if sq.nested && sq.sleeping && moved > 2 {
+            nag -= dt
+            if nag <= 0 {
+                nag = 45
+                sq.say(["얼른 자…", "졸려… 너도 자…", "음냐… 내일 해…"].randomElement()!, 2.5)
+            }
+        }
+    }
+
+    func endChase() { chaseTime = 0; chaseCool = 8 }
+
+    // 우선순위: 먹기 > 일하기 > 어디 가는 중 > Claude 반응 > 아침 인사 > 노래
     func currentAct() -> Act {
         if sq.eatTime > 0 { return .eat }
-        guard sq.mode == .floor || sq.mode == .wall, sq.target == nil else { return .none }
+        if sq.workTime > 0 { return .dig }
+        guard sq.mode == .floor || sq.mode == .wall, sq.target == nil, !sq.nested else { return .none }
         if claudeReact {
             switch claude.state {
-            case .thinking: return .think("흠")
-            case .tool(let what): return .think(what)
+            case .thinking: return claude.busyMinutes.map { .wait($0) } ?? .think("흠")
+            case .tool(let what): return claude.busyMinutes.map { .wait($0) } ?? .think(what)
             case .done: return .done
+            case .cheer: return .cheer
+            case .error: return .startle
             case .attention: return .attention
             case .idle: break
             }
         }
-        return singAlong && music.playing ? .sing : .none
+        if sq.greetTime > 0 { return .greet }
+        if singAlong && music.playing { return index == 0 ? .sing : .harmony }
+        return .none
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+func bar(_ v: CGFloat) -> String {
+    let n = Int((min(max(v, 0), 1) * 5).rounded())
+    return String(repeating: "■", count: n) + String(repeating: "□", count: 5 - n)
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var pets: [Pet] = []
     var statusItem: NSStatusItem!
     var toggleItem: NSMenuItem!
+    var statusLine: NSMenuItem!
+    var stashItem: NSMenuItem!
     var shown = true
     var last = CACurrentMediaTime()
     var windowRefresh: CGFloat = 0
     var musicPoll: CGFloat = 0
     var acorns: [Acorn] = []
+    var mounds: [Prop] = []
+    var nest: Prop!
+    var play: (chaser: Pet, runner: Pet, time: CGFloat)?
+    var playCheck: CGFloat = 20
     var eatenItem: NSMenuItem!
     var eaten = UserDefaults.standard.integer(forKey: "acornsEaten") {
         didSet {
@@ -1172,10 +1632,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // 둥지는 주 화면 왼쪽 아래
+    var nestPos: CGPoint {
+        let b = NSScreen.screens[0].visibleFrame
+        return CGPoint(x: b.minX + 140, y: b.minY)
+    }
+
+    var props: [NSWindow] { acorns.map(\.window) + mounds.map(\.window) + [nest.window] }
+
     func applicationDidFinishLaunching(_ n: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "🐿️"
         let menu = NSMenu()
+        menu.delegate = self
+        statusLine = menu.addItem(withTitle: "", action: nil, keyEquivalent: "")
+        menu.addItem(.separator())
         toggleItem = menu.addItem(withTitle: "다람쥐 숨기기", action: #selector(toggle), keyEquivalent: "h")
         toggleItem.target = self
         let deskItem = menu.addItem(withTitle: "바탕화면에서만 놀기", action: #selector(toggleDesktop(_:)), keyEquivalent: "d")
@@ -1187,9 +1658,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let claudeItem = menu.addItem(withTitle: "Claude 따라 고민하기", action: #selector(toggleClaude(_:)), keyEquivalent: "c")
         claudeItem.target = self
         claudeItem.state = claudeReact ? .on : .off
+        let weatherItem = menu.addItem(withTitle: "날씨 따라 우산 쓰기", action: #selector(toggleWeather(_:)), keyEquivalent: "w")
+        weatherItem.target = self
+        weatherItem.state = weatherReact ? .on : .off
         menu.addItem(.separator())
         menu.addItem(withTitle: "도토리 주기", action: #selector(giveAcorn), keyEquivalent: "a").target = self
         eatenItem = menu.addItem(withTitle: "지금까지 먹은 도토리: \(eaten)개", action: nil, keyEquivalent: "")
+        stashItem = menu.addItem(withTitle: "", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "다람쥐 한 마리 더", action: #selector(addPet), keyEquivalent: "n").target = self
         menu.addItem(withTitle: "한 마리 보내기", action: #selector(removePet), keyEquivalent: "").target = self
@@ -1197,11 +1672,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: "종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusItem.menu = menu
 
+        nest = Prop(.nest, at: nestPos, show: false)
+        mounds = needs.stash.map { Prop(.mound, at: CGPoint(x: $0, y: groundY(at: $0))) }
         addPet()
         let t = Timer(timeInterval: 1.0 / 60, repeats: true) { [unowned self] _ in
             let now = CACurrentMediaTime()
             let dt = CGFloat(min(now - last, 0.05))
             last = now
+            needs.tick(dt)
             guard shown else { return }
             windowRefresh -= dt
             let restack = windowRefresh <= 0
@@ -1215,11 +1693,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 musicPoll = 1
             }
             claude.poll()
+            world.tick(dt)
+            if let news = world.news {
+                world.news = nil
+                pets.randomElement()?.sq.say(news, 2.5)
+            }
             acorns.forEach { $0.tick(dt) }
-            feed()
-            pets.forEach { $0.tick(dt, restack: restack) }
+            plan()
+            updatePlay(dt)
+            for (i, p) in pets.enumerated() {
+                p.index = i
+                p.tick(dt, restack: restack)
+            }
+            updateNest(restack: restack)
         }
         RunLoop.main.add(t, forMode: .common)
+    }
+
+    func applicationWillTerminate(_ n: Notification) { needs.save() }
+
+    // 메뉴를 열 때 컨디션 표시
+    func menuWillOpen(_ menu: NSMenu) {
+        statusLine.title = "배고픔 \(bar(needs.hunger))   기분 \(bar(needs.mood))"
+        stashItem.title = "묻어둔 도토리: \(needs.stash.count)개"
     }
 
     // 바탕화면 층 <-> 모든 창 위
@@ -1227,15 +1723,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         onDesktop.toggle()
         item.state = onDesktop ? .on : .off
         refreshWindows()
-        for w in pets.map(\.window) + acorns.map(\.window) {
+        for w in pets.map(\.window) + props {
             w.level = petLevel()
-            if shown { w.orderFrontRegardless() }
+            if shown && (w !== nest.window || w.isVisible) { w.orderFrontRegardless() }
         }
     }
 
     @objc func toggleClaude(_ item: NSMenuItem) {
         claudeReact.toggle()
         item.state = claudeReact ? .on : .off
+    }
+
+    @objc func toggleWeather(_ item: NSMenuItem) {
+        weatherReact.toggle()
+        item.state = weatherReact ? .on : .off
+        world.weather = .clear
+        if weatherReact { world.pollWeather() }
     }
 
     // 다람쥐 근처 하늘에서 도토리 하나
@@ -1247,20 +1750,184 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         acorns.append(Acorn(at: CGPoint(x: x, y: b.maxY - 40)))
     }
 
-    // 다람쥐마다 가장 가까운 도토리를 쫓고, 닿으면 먹음
-    func feed() {
-        for pet in pets {
+    // 다람쥐마다 지금 어디로 갈지 정하고, 도착하면 할 일을 시작
+    func plan() {
+        let m = NSEvent.mouseLocation
+        for (i, pet) in pets.enumerated() {
             let sq = pet.sq
-            guard sq.eatTime <= 0, sq.mode != .held,
-                  let i = acorns.indices.min(by: { abs(acorns[$0].pos.x - sq.pos.x) < abs(acorns[$1].pos.x - sq.pos.x) })
-            else { sq.target = nil; continue }
-            if sq.target == nil { sq.say("도토리다!") }
-            sq.target = acorns[i].pos.x
-            if acorns[i].landed, sq.mode == .floor, sq.surface == nil, abs(acorns[i].pos.x - sq.pos.x) < 10 {
-                acorns.remove(at: i).window.orderOut(nil)
+            if sq.finished {
+                sq.finished = false
+                finishChore(pet)
+            }
+            guard sq.eatTime <= 0, sq.workTime <= 0, sq.mode != .held else {
+                sq.target = nil
+                pet.goal = nil
+                continue
+            }
+            let b = screenBounds(for: sq.pos)
+            var goal: Goal?
+            var x: CGFloat = 0, rush: CGFloat = 95
+            if let a = acorns.min(by: { abs($0.pos.x - sq.pos.x) < abs($1.pos.x - sq.pos.x) }) {
+                goal = .acorn(ObjectIdentifier(a)); x = a.pos.x
+            } else if pet.chaseTime > 0 {
+                goal = .mouse; x = m.x; rush = 170
+            } else if claudeReact, claude.state == .attention, sq.mode == .floor, !sq.nested, abs(m.x - sq.pos.x) > 140 {
+                // Claude가 허락을 기다리면 마우스 쪽으로 다가가서 손 흔들기
+                goal = .approach; x = m.x; rush = 110
+            } else if let p = play, p.chaser === pet {
+                goal = .tag; x = p.runner.sq.pos.x; rush = 150
+            } else if let p = play, p.runner === pet {
+                goal = .flee; x = sq.pos.x + (sq.pos.x >= p.chaser.sq.pos.x ? 200 : -200); rush = 120
+            } else if needs.hungry, let s = needs.stash.min(by: { abs($0 - sq.pos.x) < abs($1 - sq.pos.x) }) {
+                goal = .stash(s); x = s; rush = 80
+            } else if world.trashed && i == 0 {
+                // 휴지통은 보통 Dock 오른쪽 끝
+                goal = .trash; x = b.maxX - 120; rush = 110
+            } else if world.night && !sq.nested {
+                goal = .nest; x = nestPos.x + [0, -26, 26, -13, 13][i % 5]; rush = 60
+            }
+            x = min(max(x, b.minX + 80), b.maxX - 80)
+            if goal != nil, goal != .nest { sq.nested = false }
+
+            if goal != pet.goal {
+                pet.goal = goal
+                switch goal {
+                case .acorn?: sq.say("도토리다!")
+                case .approach?: sq.say("불렀어?")
+                case .stash?: sq.say("숨겨둔 도토리 먹어야지~", 2)
+                case .trash?: sq.say("방금 뭐 버렸어?", 2)
+                case .nest?: sq.say("졸려… 둥지 가야지", 2)
+                default: break
+                }
+            }
+            sq.target = goal == nil ? nil : x
+            sq.rush = rush
+            guard let g = goal, sq.mode == .floor, sq.surface == nil else { continue }
+            let dx = abs(x - sq.pos.x)
+
+            switch g {
+            case .acorn(let id):
+                guard let a = acorns.first(where: { ObjectIdentifier($0) == id }) else { break }
+                // 같은 도토리를 노리는 다람쥐끼리 마주치면
+                if dx < 150, pet.claimed != id,
+                   pets.contains(where: { $0 !== pet && $0.goal == g && abs($0.sq.pos.x - sq.pos.x) < 90 }) {
+                    pet.claimed = id
+                    sq.say("내꺼야!", 1.2)
+                }
+                guard a.landed, dx < 10 else { break }
+                acorns.removeAll { $0 === a }
+                a.window.orderOut(nil)
+                for o in pets where o !== pet && o.goal == g {
+                    o.sq.say("치… 내 도토리…", 1.8)
+                    o.goal = nil
+                }
+                pet.goal = nil
+                if needs.full {
+                    // 배부르면 나중을 위해 묻어둠
+                    pet.chore = .bury
+                    sq.startWork(1.8, "나중에 먹어야지~")
+                } else {
+                    sq.startEating()
+                    eaten += 1
+                }
+            case .mouse:
+                if dx < 40 && m.y < sq.feet + 160 {
+                    pet.endChase()
+                    pet.goal = nil
+                    sq.pounce(toward: m.x)
+                }
+            case .tag:
+                if let p = play, abs(p.runner.sq.pos.x - sq.pos.x) < 30 {
+                    sq.say("잡았다!", 1.4)
+                    p.runner.sq.say("꺅!", 1.2)
+                    sq.happyTime = 2
+                    p.runner.sq.happyTime = 2
+                    needs.cheer(0.1)
+                    play = nil
+                }
+            case .stash(let s):
+                if dx < 10 {
+                    pet.goal = nil
+                    pet.chore = .unbury(s)
+                    sq.startWork(1.6, "어디 묻었더라…")
+                }
+            case .trash:
+                if dx < 10 {
+                    world.trashed = false
+                    pet.goal = nil
+                    pet.chore = .trash
+                    sq.startWork(2.2, "뒤적뒤적…")
+                }
+            case .nest:
+                if dx < 8 {
+                    pet.goal = nil
+                    sq.target = nil
+                    sq.nested = true
+                    sq.sleeping = true
+                    sq.targetSpeed = 0
+                    sq.timer = rnd(20, 40)
+                }
+            case .approach, .flee:
+                break
+            }
+        }
+    }
+
+    func finishChore(_ pet: Pet) {
+        let sq = pet.sq
+        switch pet.chore {
+        case .bury?:
+            needs.stash.append(sq.pos.x)
+            mounds.append(Prop(.mound, at: CGPoint(x: sq.pos.x, y: groundY(at: sq.pos.x))))
+            sq.say("다 묻었다! 🌰", 1.6)
+        case .unbury(let s)?:
+            if let i = needs.stash.firstIndex(of: s) {
+                needs.stash.remove(at: i)
+                if let j = mounds.firstIndex(where: { $0.pos.x == s }) { mounds.remove(at: j).window.orderOut(nil) }
                 sq.startEating()
                 eaten += 1
+            } else {
+                sq.say("어? 없어졌다…")
             }
+        case .trash?:
+            sq.say(["이거 버려도 돼?", "쓸만한 거 없네…", "도토리는 없다…"].randomElement()!, 2.2)
+        case nil:
+            break
+        }
+        pet.chore = nil
+        needs.save()
+    }
+
+    // 두 마리 이상이면 가끔 술래잡기
+    func updatePlay(_ dt: CGFloat) {
+        if var p = play {
+            p.time -= dt
+            let alive = pets.contains { $0 === p.chaser } && pets.contains { $0 === p.runner }
+            play = p.time > 0 && alive ? p : nil
+            if play == nil && alive { p.chaser.sq.say("헥헥… 못 잡겠다", 1.8) }
+            return
+        }
+        playCheck -= dt
+        guard playCheck <= 0 else { return }
+        playCheck = rnd(25, 45)
+        guard needs.mood > 0.35, !world.night, rnd(0, 1) < 0.5 else { return }
+        let free = pets.filter {
+            $0.sq.mode == .floor && $0.sq.surface == nil && $0.sq.act == .none && $0.sq.target == nil
+                && !$0.sq.sleeping && !$0.sq.nested
+        }.shuffled()
+        guard free.count >= 2 else { return }
+        play = (free[0], free[1], 6)
+        free[0].sq.say("술래잡기 하자!", 1.6)
+        free[1].sq.say("잡아봐라~", 1.6)
+    }
+
+    // 둥지는 밤에만, 다람쥐보다 앞에 둬서 다리를 가림
+    func updateNest(restack: Bool) {
+        let want = world.night || pets.contains { $0.sq.nested }
+        if want != nest.window.isVisible {
+            if want { nest.window.orderFrontRegardless() } else { nest.window.orderOut(nil) }
+        } else if want && restack {
+            nest.window.orderFrontRegardless()
         }
     }
 
@@ -1274,14 +1941,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         toggleItem.title = shown ? "다람쥐 숨기기" : "다람쥐 보이기"
         statusItem.button?.appearsDisabled = !shown
         for p in pets { shown ? p.window.orderFrontRegardless() : p.window.orderOut(nil) }
-        for a in acorns { shown ? a.window.orderFrontRegardless() : a.window.orderOut(nil) }
+        for w in props where !(shown && w === nest.window) { shown ? w.orderFrontRegardless() : w.orderOut(nil) }
     }
 
     @objc func addPet() {
         if !shown { toggle() }
         // 화면 위쪽에서 활강하며 등장
         let b = NSScreen.screens[0].visibleFrame
-        pets.append(Pet(at: CGPoint(x: rnd(b.minX + 150, b.maxX - 150), y: b.maxY - 120)))
+        let pet = Pet(at: CGPoint(x: rnd(b.minX + 150, b.maxX - 150), y: b.maxY - 120))
+        // 그날 처음 아침에 켜면 기지개
+        if pets.isEmpty && world.morning {
+            let day = Calendar.current.ordinality(of: .day, in: .era, for: Date()) ?? 0
+            if UserDefaults.standard.integer(forKey: "greetDay") != day {
+                UserDefaults.standard.set(day, forKey: "greetDay")
+                pet.sq.greetTime = 6
+            }
+        }
+        pets.append(pet)
     }
 
     @objc func removePet() {
@@ -1301,8 +1977,21 @@ func snapshot(_ dir: String) {
         ("climb", { $0.mode = .wall; $0.speed = 45; $0.gait = 1 }),
         ("climbsleep", { $0.mode = .wall; $0.sleeping = true; $0.time = 0.4 }),
         ("glide", { $0.mode = .air; $0.airTime = 1 }),
+        ("wave", { $0.mode = .floor; $0.act = .attention; $0.time = 0.1 }),
+        ("startle", { $0.mode = .floor; $0.act = .startle; $0.time = 0.02 }),
+        ("wait", { $0.mode = .floor; $0.act = .wait(3); $0.time = 0.1 }),
+        ("greet", { $0.mode = .floor; $0.act = .greet; $0.time = 0.1 }),
+        ("dig", { $0.mode = .floor; $0.act = .dig; $0.time = 0.3; $0.say("어디 묻었더라…") }),
+        ("flip", { $0.mode = .air; $0.flipTime = 0.4 }),
+        ("umbrella", { $0.mode = .floor; $0.speed = 45; $0.gait = 1; world.weather = .rain }),
+        ("umbrellasing", { $0.mode = .floor; $0.act = .sing; $0.lyric = "♪ 라라라"; world.weather = .rain }),
     ]
+    for (name, pose) in [("nest", Pose.nest), ("mound", Pose.mound)] {
+        let rep = NSBitmapImageRep(cgImage: sprite(pose))
+        try? rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
+    }
     for (name, set) in poses {
+        world.weather = .clear
         let s = Squirrel(); set(s)
         let v = PetView(frame: NSRect(x: 0, y: 0, width: W * 2, height: W * 2), squirrel: s)
         v.scale = 2
