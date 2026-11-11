@@ -1049,6 +1049,9 @@ typealias Grid = [[Character]]
 
 let palette: [Character: (UInt8, UInt8, UInt8)] = [
     "g": (200, 184, 166),   // 털
+    "x": (226, 214, 200),   // 빛 받은 털끝 (복슬복슬)
+    "O": (104, 80, 70),     // 다람쥐 외곽선 (조금 부드럽게)
+    "H": (196, 214, 255),   // 눈 아래 작은 반짝
     "d": (150, 130, 114),   // 진한 털 (귀, 꼬리 테두리, 날개막 가장자리)
     "e": (172, 152, 136),   // 날개막
     "w": (252, 248, 240),   // 배
@@ -1140,8 +1143,8 @@ let frontBody = [
     "....ggkkggggggkkgg.dgg",
     "....gkhkkggggkhkkg.ggg",
     "....gkkkkgnngkkkkg.dgg",
-    "....gpkkgwwwwgkkpg.ggg",
-    ".....ggwwwwwwwwgg..gdg",
+    "....ggkkgwwwwgkkgg.ggg",
+    ".....ppwwwwwwwwpp..gdg",
     "....gggwwwwwwwwggg.ggg",
     "...ggwwwffwwffwwwgggdg",
     "...gwwwwffwwffwwwwggg.",
@@ -1153,13 +1156,13 @@ let frontBody = [
 
 // 옆모습, 머리가 오른쪽. 마지막 두 줄은 다리 자리
 let sideBody = [
-    ".gg...........gg..gg....",
-    "gdgg.........gddggddg...",
-    "gdggg.......gggggggggg..",
-    "ggdgg......gggggggggggg.",
-    ".gdgg......ggggggkkkggg.",
-    ".ggdg....ggggggggkhkgggn",
-    "..gdgg.ggggggggggkkkggg.",
+    "...ggg........gg..gg....",
+    "..gggxg......gddggddg...",
+    ".ggdggxg....gggggggggg..",
+    "ggdddggg...gggggggggggg.",
+    "gggddggg...ggggggkkkggg.",
+    ".gggdgggg.gggggggkhkgggn",
+    "..ggdggggggggggggkkkggg.",
     "...ggggggggggggggggpggw.",
     "....gggggwwwwwwwwggggww.",
     "....ddgwwwwwwwwwwwwggg..",
@@ -1178,8 +1181,8 @@ let climbBody = [
     "....ggkkggggggkkgg....",
     "....gkhkkggggkhkkg....",
     "....gkkkkgnngkkkkg....",
-    "....gpkkgwwwwgkkpg....",
-    ".....ggwwwwwwwwgg.....",
+    "....ggkkgwwwwgkkgg....",
+    ".....ppwwwwwwwwpp.....",
     "....gggwwwwwwwwggg....",
     "...ggwwwwwwwwwwwwgg...",
     "..dgwwwwwwwwwwwwwwgd..",
@@ -1206,7 +1209,7 @@ let glideBody = [
     ".......ggkkggggggkkgg.......",
     ".......gkhkkggggkhkkg.......",
     "f......gkkkkgnngkkkkg......f",
-    "fdddd...gpggwwwwggpg...ddddf",
+    "fdddd...ppggwwwwggpp...ddddf",
     ".deeeddgggwwwwwwwwgggddeeed.",
     ".deeeeeggwwwwwwwwwwggeeeeed.",
     ".deeeeeggwwwwwwwwwwggeeeeed.",
@@ -1264,8 +1267,43 @@ func closeEyes(_ g: inout Grid) {
     }
 }
 
+// 복슬복슬: 털 가장자리에 삐죽삐죽 털뭉치, 위쪽 털끝은 빛 받아 밝게, 눈엔 반짝 하나 더
+func fluffy(_ src: Grid) -> Grid {
+    var g = pad(src, t: 1, l: 1, r: 1, b: 0)
+    let base = g
+    let fur: Set<Character> = ["g"]   // 날개막 가장자리는 깔끔하게
+    func at(_ x: Int, _ y: Int) -> Character {
+        guard y >= 0, y < base.count, x >= 0, x < base[y].count else { return "#" }
+        return base[y][x]
+    }
+    // 아래 세 줄(발, 배 밑)은 깔끔하게 두고, 위와 옆으로만 털이 삐죽
+    let bottom = base.count - 3
+    for y in base.indices where y < bottom {
+        for x in base[y].indices where fur.contains(base[y][x]) {
+            let tuft = (x * 7 + y * 3) % 4 == 0
+            guard tuft else { continue }
+            if at(x, y - 1) == "." && at(x - 1, y) != "." && at(x + 1, y) != "." { g[y - 1][x] = base[y][x] }
+            else if at(x - 1, y) == "." && at(x, y - 1) != "." && y > 1 { g[y][x - 1] = base[y][x] }
+            else if at(x + 1, y) == "." && at(x, y - 1) != "." && y > 1 { g[y][x + 1] = base[y][x] }
+        }
+    }
+    // 위가 비어 있는 털은 빛 받은 털끝
+    let shaped = g
+    for y in shaped.indices {
+        for x in shaped[y].indices where shaped[y][x] == "g" && (y == 0 || shaped[y - 1][x] == ".") { g[y][x] = "x" }
+    }
+    // 큰 눈엔 오른쪽 아래에 작은 반짝
+    for y in shaped.indices {
+        for x in shaped[y].indices where shaped[y][x] == "h" {
+            let tx = x + 1, ty = y + 2
+            if ty < shaped.count, tx < shaped[ty].count, shaped[ty][tx] == "k", shaped[ty - 1][tx] == "k" { g[ty][tx] = "H" }
+        }
+    }
+    return g
+}
+
 // 1픽셀 외곽선
-func outlined(_ g: Grid) -> Grid {
+func outlined(_ g: Grid, ink: Character = "o") -> Grid {
     var o = g
     for y in g.indices {
         for x in g[y].indices where g[y][x] == "." {
@@ -1274,7 +1312,7 @@ func outlined(_ g: Grid) -> Grid {
                 guard ny >= 0, ny < g.count, nx >= 0, nx < g[ny].count else { return false }
                 return g[ny][nx] != "."
             }
-            if n { o[y][x] = "o" }
+            if n { o[y][x] = ink }
         }
     }
     return o
@@ -1467,7 +1505,13 @@ func sprite(_ pose: Pose, _ acc: Accessory? = nil) -> CGImage {
     case .obj(let k, let n): g = k.art(n).map(Array.init)
     }
     if let acc = acc, let head = headTop(pose) { g = wear(g, acc, at: head) }
-    let s = image(outlined(pad(g, t: 1, l: 1, r: 1, b: 1)))
+    let animal: Bool
+    switch pose {
+    case .climb, .side, .front, .think, .eat, .glide, .wave, .startle: animal = true
+    default: animal = false
+    }
+    if animal { g = fluffy(g) }
+    let s = image(outlined(pad(g, t: 1, l: 1, r: 1, b: 1), ink: animal ? "O" : "o"))
     spriteCache[key] = s
     return s
 }
