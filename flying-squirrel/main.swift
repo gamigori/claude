@@ -19,6 +19,9 @@
 // - 여러 마리면 술래잡기, 도토리 쟁탈전, 노래할 땐 화음
 // - 다람쥐마다 이름과 성격(장난꾸러기/먹보/잠꾸러기/겁쟁이/노래쟁이)이 있고, 성격에 맞는 머리 장식을 함
 // - 바탕화면에 다람쥐 집: 모양, 지붕 색, 장식을 고르고 끌어서 옮김. 밤엔 들어가서 자고 낮에도 가끔 들름
+// - 맵 꾸미기: 발판, 사료통, 트램펄린, 방석, 화분, 가로등을 바탕화면에 놓고 옮김
+//   놓을 때 다람쥐 점프 궤적을 잔상으로 보여줘서 뛰어갈 수 있는지 미리 알 수 있음 (실제 점프도 같은 계산)
+//   다람쥐는 발판을 건너건너 길을 찾아가고, 사료통엔 도토리가 쌓여서 배고프면 와서 먹음
 import AppKit
 import IOKit.ps
 
@@ -37,7 +40,7 @@ let up: CGFloat = .pi / 2, down: CGFloat = -.pi / 2
 
 // MARK: - 다른 앱 창, 위젯, 스티커 메모 (다람쥐가 올라탈 수 있는 곳)
 
-enum WinKind { case app, widget, sticky }
+enum WinKind { case app, widget, sticky, custom }
 struct Win { let id: Int; let frame: CGRect; let kind: WinKind }
 
 // 앞에 있는 창부터 순서대로
@@ -45,6 +48,10 @@ var windows: [Win] = []
 
 // true면 바탕화면 층에서만 놀고, 앱 창 대신 위젯과 스티커 메모 위에 올라감
 var onDesktop = true
+// 맵 꾸미기에서 놓은 발판 (창처럼 올라탈 수 있음, id는 음수)
+var customWins: [Win] = []
+// 맵 꾸미기 중이면 전부 앱 창 위로 올라옴
+var editing = false
 var singAlong = true
 
 let iconLevel = Int(CGWindowLevelForKey(.desktopIconWindow))
@@ -52,17 +59,42 @@ let widgetLevel = iconLevel + 2
 
 // 바탕화면 모드: 파일 아이콘과 위젯보다 위, 앱 창보다는 아래
 func petLevel() -> NSWindow.Level {
-    onDesktop ? NSWindow.Level(widgetLevel + 1) : .floating
+    onDesktop && !editing ? NSWindow.Level(widgetLevel + 1) : .floating
 }
 
-func isPlatform(_ w: Win) -> Bool { !onDesktop || w.kind != .app }
+func isPlatform(_ w: Win) -> Bool { w.kind == .custom || !onDesktop || w.kind != .app }
+
+// 발판에서 발판으로 뛰는 포물선. 다람쥐의 실제 점프와 맵 꾸미기의 잔상 미리보기가 같이 씀
+// (위로는 155pt쯤, 옆으로는 체공 시간 동안 초속 330pt까지)
+func jumpArc(from a: CGPoint, to b: CGPoint) -> (v: CGVector, T: CGFloat)? {
+    let h = b.y - a.y
+    let vy = (2 * gravity * (max(h, 0) + 36)).squareRoot()
+    guard vy <= 830 else { return nil }
+    let T = (vy + (vy * vy - 2 * gravity * h).squareRoot()) / gravity
+    let vx = (b.x - a.x) / T
+    guard abs(vx) <= 330 else { return nil }
+    return (CGVector(dx: vx, dy: vy), T)
+}
+
+// 진행 중인 점프
+struct Jump {
+    let from: CGPoint       // 발 디딘 곳
+    let v: CGVector
+    let T: CGFloat
+    let surface: Int?       // 내려앉을 발판 (바닥이면 nil)
+    var t: CGFloat = 0
+
+    func point(_ t: CGFloat) -> CGPoint {
+        CGPoint(x: from.x + v.dx * t, y: from.y + v.dy * t - gravity * t * t / 2)
+    }
+}
 
 func refreshWindows() {
     let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
     guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] else { return }
     let primaryTop = NSScreen.screens[0].frame.maxY
     let me = Int(ProcessInfo.processInfo.processIdentifier)
-    windows = list.compactMap { (d: [String: Any]) -> Win? in
+    windows = customWins + list.compactMap { (d: [String: Any]) -> Win? in
         guard let layer = d[kCGWindowLayer as String] as? Int, layer == 0 || layer == widgetLevel,
               let pid = d[kCGWindowOwnerPID as String] as? Int, pid != me,
               ((d[kCGWindowAlpha as String] as? Double) ?? 1) > 0,
@@ -519,6 +551,8 @@ final class Squirrel {
     var nested = false          // 둥지에서 자는 중
     var tired = false           // 배터리가 없거나 너무 배고파서 기운 없음
     var lively: CGFloat = 0.5   // 기분
+    var jump: Jump?             // 발판으로 뛰는 중
+    var keepSurface = false     // 목적지가 발판 위에 있어서 뛰어내리지 않고 걸어감
     var personality = Personality.playful
     var name = ""
     // 지금이 이 다람쥐가 잘 시간인지
@@ -585,6 +619,22 @@ final class Squirrel {
 
     func updateAir(_ dt: CGFloat, _ b: CGRect) {
         airTime += dt
+        if var j = jump {
+            // 계산해 둔 포물선을 그대로 따라가서 정확히 내려앉음
+            j.t += dt
+            gait += dt * 14
+            if abs(j.v.dx) > 20 { dir = j.v.dx > 0 ? 1 : -1 }
+            let p = j.point(min(j.t, j.T))
+            pos.x = p.x
+            feet = p.y
+            if j.t >= j.T {
+                jump = nil
+                land(on: j.surface, ground: p.y)
+            } else {
+                jump = j
+            }
+            return
+        }
         vel.dy -= gravity * dt
         if gliding {
             // 날개막 덕분에 천천히 떨어지면서 옆으로 미끄러짐
@@ -643,7 +693,7 @@ final class Squirrel {
     func updateFloor(_ dt: CGFloat, _ b: CGRect) {
         if let tx = target, act == .none {
             // 도토리를 향해 종종종 (위젯이나 메모 위면 뛰어내림)
-            if surface != nil { return fall() }
+            if surface != nil && !keepSurface { return fall() }
             sleeping = false
             dir = tx > pos.x ? 1 : -1
             targetSpeed = abs(tx - pos.x) < 6 ? 0 : rush
@@ -726,6 +776,8 @@ final class Squirrel {
         } else if r < 0.82 {
             targetSpeed = rnd(25, 50); timer = rnd(2, 5)
             if rnd(0, 1) < 0.35 { dir = -dir }
+        } else if surface != nil {
+            targetSpeed = rnd(25, 50); timer = rnd(2, 5)
         } else {
             // 벽으로 올라가기
             mode = .wall
@@ -746,6 +798,7 @@ final class Squirrel {
     }
 
     func fall() {
+        jump = nil
         mode = .air
         surface = nil
         airTime = 0
@@ -754,6 +807,7 @@ final class Squirrel {
     }
 
     func grab(at p: CGPoint) {
+        jump = nil
         mode = .held
         heading = up
         sleeping = false
@@ -789,7 +843,17 @@ final class Squirrel {
         }
     }
 
+    // 발판으로 폴짝
+    func leap(_ j: Jump) {
+        mode = .air
+        surface = nil
+        airTime = 0
+        sleeping = false
+        jump = j
+    }
+
     func hop(_ v: CGVector) {
+        jump = nil
         mode = .air
         surface = nil
         airTime = 0
@@ -1250,6 +1314,7 @@ func startleSprite() -> Grid {
 enum Pose: Hashable {
     case climb(Int, Bool), side(Int, Bool), front(open: Bool, happy: Bool), think(Int), eat(Int), glide, acorn
     case wave(Int), startle, nest, mound, umbrella
+    case obj(ObjKind, Int)
 }
 
 // 성격에 맞는 머리 장식
@@ -1308,6 +1373,7 @@ func sprite(_ pose: Pose, _ acc: Accessory? = nil) -> CGImage {
     case .nest: g = nestBody.map(Array.init)
     case .mound: g = moundBody.map(Array.init)
     case .umbrella: g = umbrellaBody.map(Array.init)
+    case .obj(let k, let n): g = k.art(n).map(Array.init)
     }
     if let acc = acc, let head = headTop(pose) { g = wear(g, acc, at: head) }
     let s = image(outlined(pad(g, t: 1, l: 1, r: 1, b: 1)))
@@ -1583,6 +1649,8 @@ func groundY(at x: CGFloat) -> CGFloat {
 final class Acorn: Prop {
     var vy: CGFloat = 0
     var landed = false
+    weak var into: MapObj?      // 사료통 위로 떨어지는 도토리
+    var absorbed = false
 
     init(at p: CGPoint) { super.init(.acorn, at: p) }
 
@@ -1590,6 +1658,7 @@ final class Acorn: Prop {
         if !landed {
             vy -= gravity * dt
             pos.y += vy * dt
+            if let f = into, pos.y <= f.frame.maxY - 8 { absorbed = true }
             let ground = screenBounds(for: pos).minY
             if pos.y <= ground {
                 pos.y = ground
@@ -1904,9 +1973,510 @@ final class House {
     }
 }
 
+// MARK: - 맵 꾸미기: 발판과 기능 오브젝트
+
+enum ObjKind: String, CaseIterable {
+    case plank, longPlank, feeder, trampoline, cushion, flowerPot, lamp
+
+    var title: String {
+        switch self {
+        case .plank: return "발판"
+        case .longPlank: return "긴 발판"
+        case .feeder: return "사료통"
+        case .trampoline: return "트램펄린"
+        case .cushion: return "방석"
+        case .flowerPot: return "화분"
+        case .lamp: return "가로등"
+        }
+    }
+
+    var hint: String {
+        switch self {
+        case .plank, .longPlank: return "다람쥐가 뛰어 올라가 걸어 다녀요"
+        case .feeder: return "도토리가 2분마다 하나씩 쌓이고, 배고프면 와서 먹어요"
+        case .trampoline: return "밟으면 높이 튀어 올라 활강해요"
+        case .cushion: return "와서 낮잠을 자요"
+        case .flowerPot, .lamp: return "꾸미기용 (가로등은 밤에 켜져요)"
+        }
+    }
+
+    var isPlatform: Bool { self == .plank || self == .longPlank }
+
+    // n: 사료통이면 쌓인 도토리 수, 가로등이면 불 켜짐(1)
+    func art(_ n: Int) -> [String] {
+        switch self {
+        case .plank: return plankArt(24)
+        case .longPlank: return plankArt(40)
+        case .feeder:
+            var g = feederBody.map(Array.init)
+            // 아래층부터 도토리가 쌓임
+            for (x, y) in feederSlots.prefix(n) {
+                g[y - 1][x] = "a"; g[y - 1][x + 1] = "a"
+                g[y][x] = "b"; g[y][x + 1] = "l"
+            }
+            return g.map { String($0) }
+        case .trampoline: return ["cccccccccccccccc", "CCCCCCCCCCCCCCCC", ".o............o.", "oo............oo"]
+        case .cushion: return ["..pppppppppp..", ".pppppppppppp.", "pppppnppppnppp", ".nnnnnnnnnnnn."]
+        case .flowerPot: return [".p...j.", "pjp.jaj", ".pL..jL", "..LLLL.", ".PPPPP.", ".PPPPP.", "..PPP.."]
+        case .lamp:
+            let light = n == 1 ? "j" : "S"
+            return ["ooooo", "o" + String(repeating: light, count: 3) + "o", "o" + String(repeating: light, count: 3) + "o",
+                    "ooooo"] + Array(repeating: "..o..", count: 10) + [".ooo."]
+        }
+    }
+}
+
+func plankArt(_ w: Int) -> [String] {
+    (0..<3).map { r in String((0..<w).map { x -> Character in r == 2 || (r == 1 && x % 9 == 1) ? "V" : "W" }) }
+}
+
+let feederCapacity = 7
+let feederBody = [
+    "....rrrr....",
+    "..rrrrrrrr..",
+    "rrrrrrrrrrrr",
+    "mmmmmmmmmmmm",
+    ".VDDDDDDDDV.",
+    ".VDDDDDDDDV.",
+    ".VDDDDDDDDV.",
+    ".VDDDDDDDDV.",
+    ".VWWWWWWWWV.",
+    ".VVVVVVVVVV.",
+    ".V........V.",
+    ".V........V.",
+]
+let feederSlots = [(2, 7), (4, 7), (6, 7), (8, 7), (3, 5), (5, 5), (7, 5)]
+
+final class ObjView: NSView {
+    weak var obj: MapObj?
+    override var isOpaque: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let c = NSGraphicsContext.current?.cgContext, let obj = obj else { return }
+        c.clear(bounds)
+        c.interpolationQuality = .none
+        let img = sprite(obj.pose)
+        c.draw(img, in: CGRect(x: 0, y: 0, width: CGFloat(img.width) * P, height: CGFloat(img.height) * P))
+    }
+
+    // 맵 꾸미기 중에만: 끌어서 옮기기, 우클릭(또는 지우개)으로 지우기
+    private var grab = CGPoint.zero
+    override func mouseDown(with e: NSEvent) {
+        guard let obj = obj else { return }
+        if mapEditor.erasing {
+            mapEditor.onErase?(obj)
+            return
+        }
+        let m = NSEvent.mouseLocation
+        grab = CGPoint(x: m.x - obj.pos.x, y: m.y - obj.pos.y)
+        mapEditor.focus = obj
+    }
+    override func mouseDragged(with e: NSEvent) {
+        guard let obj = obj, mapEditor.focus === obj else { return }
+        let m = NSEvent.mouseLocation
+        obj.pos = CGPoint(x: (m.x - grab.x).rounded(), y: (m.y - grab.y).rounded())
+        obj.place()
+    }
+    override func mouseUp(with e: NSEvent) {
+        guard let obj = obj, mapEditor.focus === obj else { return }
+        mapEditor.focus = nil
+        obj.pos = snapped(obj.kind, obj.pos)
+        obj.place()
+        mapEditor.onChange?()
+    }
+    override func rightMouseDown(with e: NSEvent) {
+        if let obj = obj { mapEditor.onErase?(obj) }
+    }
+}
+
+final class MapObj {
+    private static var nextId = -1
+    let id: Int
+    let kind: ObjKind
+    var pos: CGPoint            // 아래 가운데 (발판이면 밑면, 나머지는 놓인 바닥)
+    var acorns: Int { didSet { if acorns != oldValue { redraw() } } }
+    var lit = false { didSet { if lit != oldValue { redraw() } } }
+    let window: NSWindow
+    let view = ObjView()
+
+    init(_ kind: ObjKind, at p: CGPoint, acorns: Int = 0) {
+        id = MapObj.nextId
+        MapObj.nextId -= 1
+        self.kind = kind
+        pos = p
+        self.acorns = acorns
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 10, height: 10), styleMask: .borderless,
+                          backing: .buffered, defer: false)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.ignoresMouseEvents = !editing
+        window.level = petLevel()
+        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+        window.contentView = view
+        view.obj = self
+        redraw()
+    }
+
+    var pose: Pose { .obj(kind, kind == .feeder ? acorns : kind == .lamp ? (lit ? 1 : 0) : 0) }
+
+    // 테두리를 뺀 그림 크기
+    var artSize: CGSize {
+        let a = kind.art(0)
+        return CGSize(width: CGFloat(a.map(\.count).max() ?? 0) * P, height: CGFloat(a.count) * P)
+    }
+
+    var frame: CGRect { CGRect(x: pos.x - artSize.width / 2, y: pos.y, width: artSize.width, height: artSize.height) }
+
+    func redraw() {
+        let img = sprite(pose)
+        let size = NSSize(width: CGFloat(img.width) * P, height: CGFloat(img.height) * P)
+        window.setContentSize(size)
+        view.frame = NSRect(origin: .zero, size: size)
+        place()
+        view.needsDisplay = true
+    }
+
+    func place() {
+        window.setFrameOrigin(NSPoint(x: (pos.x - artSize.width / 2 - P).rounded(), y: pos.y - P))
+    }
+}
+
+// 놓은 오브젝트들 (발판은 customWins로 창 목록에 끼워 넣음)
+var mapObjs: [MapObj] = []
+
+// 다람쥐가 서 있을 수 있는 면: 주 화면 바닥(id nil)과 발판들
+struct Plat {
+    let id: Int?
+    let minX: CGFloat, maxX: CGFloat, y: CGFloat
+}
+
+func floorPlat() -> Plat {
+    let b = NSScreen.screens[0].visibleFrame
+    return Plat(id: nil, minX: b.minX + 80, maxX: b.maxX - 80, y: b.minY)
+}
+
+func plats(_ extra: [Plat] = []) -> [Plat] {
+    [floorPlat()] + mapObjs.filter { $0.kind.isPlatform }.map {
+        Plat(id: $0.id, minX: $0.frame.minX, maxX: $0.frame.maxX, y: $0.frame.maxY)
+    } + extra
+}
+
+// A에서 B로 한 번에 뛸 수 있으면 도약 지점과 점프 (B가 너무 높거나 멀면 nil)
+func edge(_ a: Plat, _ b: Plat) -> (take: CGFloat, jump: Jump)? {
+    let aL = a.minX + 10, aR = a.maxX - 10, bL = b.minX + 14, bR = b.maxX - 14
+    guard aL <= aR, bL <= bR else { return nil }
+    let take = min(max((bL + bR) / 2, aL), aR)
+    let side: CGFloat = (bL + bR) / 2 >= take ? 40 : -40
+    for lx in [min(max(take, bL), bR), min(max(take + side, bL), bR), (bL + bR) / 2] {
+        let from = CGPoint(x: take, y: a.y), to = CGPoint(x: lx, y: b.y)
+        if let arc = jumpArc(from: from, to: to) {
+            return (take, Jump(from: from, v: arc.v, T: arc.T, surface: b.id))
+        }
+    }
+    return nil
+}
+
+// a에서 b까지 발판을 건너건너 가는 길의 첫 점프 (못 가면 nil)
+func firstHop(from a: Int?, to b: Int?, extra: [Plat] = []) -> (take: CGFloat, jump: Jump)? {
+    let ps = plats(extra)
+    guard let s = ps.firstIndex(where: { $0.id == a }), let t = ps.firstIndex(where: { $0.id == b }), s != t
+    else { return nil }
+    var prev: [Int: Int] = [:]
+    var queue = [s]
+    var seen: Set<Int> = [s]
+    while !queue.isEmpty {
+        let u = queue.removeFirst()
+        if u == t { break }
+        for v in ps.indices where !seen.contains(v) && edge(ps[u], ps[v]) != nil {
+            seen.insert(v)
+            prev[v] = u
+            queue.append(v)
+        }
+    }
+    guard seen.contains(t) else { return nil }
+    var v = t
+    while prev[v] != s { v = prev[v]! }
+    return edge(ps[s], ps[v])
+}
+
+func reachable(from a: Int?, to b: Int?, extra: [Plat] = []) -> Bool {
+    a == b || firstHop(from: a, to: b, extra: extra) != nil
+}
+
+// x 아래로 가장 가까운 면 (발판 위면 그 발판, 아니면 바닥)
+func surfaceBelow(x: CGFloat, y: CGFloat) -> (y: CGFloat, id: Int?) {
+    var best = (y: groundY(at: x), id: Int?.none)
+    for p in plats().dropFirst() where p.minX + 4 <= x && x <= p.maxX - 4 && p.y <= y + 6 && p.y > best.y {
+        best = (p.y, p.id)
+    }
+    return best
+}
+
+// 오브젝트가 놓인 면
+func objPlat(_ o: MapObj) -> Int? {
+    if o.kind.isPlatform { return o.id }
+    return surfaceBelow(x: o.pos.x, y: o.pos.y).id
+}
+
+// 맵 꾸미기에서 놓을 자리: 발판은 마우스 자리 그대로, 나머지는 아래 면에 내려놓음
+func snapped(_ k: ObjKind, _ p: CGPoint) -> CGPoint {
+    if k.isPlatform {
+        return CGPoint(x: p.x.rounded(), y: max(p.y, groundY(at: p.x) + 40).rounded())
+    }
+    return CGPoint(x: p.x.rounded(), y: surfaceBelow(x: p.x, y: p.y + 4).y)
+}
+
+// MARK: - 맵 꾸미기 화면 (팔레트 + 잔상 미리보기)
+
+final class OverlayView: NSView {
+    var origin = CGPoint.zero       // 이 뷰 왼쪽 아래의 화면 좌표
+    var mouse: CGPoint?             // 스냅샷용으로 직접 줄 수도 있음
+
+    override var isOpaque: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with e: NSEvent) {
+        guard let k = mapEditor.tool else { return }
+        mapEditor.onPlace?(k, snapped(k, NSEvent.mouseLocation))
+    }
+    override func rightMouseDown(with e: NSEvent) { mapEditor.select(nil) }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let c = NSGraphicsContext.current?.cgContext else { return }
+        c.clear(bounds)
+        c.setFillColor(CGColor(red: 0.2, green: 0.35, blue: 0.5, alpha: 0.06))
+        c.fill(bounds)
+        c.interpolationQuality = .none
+        let m = mouse ?? NSEvent.mouseLocation
+
+        // 지금 보고 있는 면: 끌고 있는 발판, 아니면 놓으려는 발판 유령
+        var focus: Plat?
+        var label: (CGPoint, Bool)?
+        if let o = mapEditor.focus {
+            if o.kind.isPlatform {
+                focus = Plat(id: o.id, minX: o.frame.minX, maxX: o.frame.maxX, y: o.frame.maxY)
+            } else {
+                let s = surfaceBelow(x: o.pos.x, y: o.pos.y + 4)
+                label = (CGPoint(x: o.pos.x, y: o.frame.maxY + 8), reachable(from: nil, to: s.id))
+            }
+        } else if let k = mapEditor.tool {
+            let p = snapped(k, m)
+            let img = sprite(.obj(k, k == .feeder ? 3 : 0))
+            let w = CGFloat(img.width) * P, h = CGFloat(img.height) * P
+            c.saveGState()
+            c.setAlpha(0.55)
+            c.draw(img, in: CGRect(x: p.x - origin.x - w / 2, y: p.y - origin.y - P, width: w, height: h))
+            c.restoreGState()
+            if k.isPlatform {
+                let size = CGFloat(k.art(0)[0].count) * P
+                focus = Plat(id: 0, minX: p.x - size / 2, maxX: p.x + size / 2, y: p.y + 3 * P)
+            } else {
+                let s = surfaceBelow(x: p.x, y: p.y + 4)
+                label = (CGPoint(x: p.x, y: p.y + h + 4), reachable(from: nil, to: s.id))
+            }
+        }
+
+        if let f = focus {
+            let extra = f.id == 0 ? [f] : []
+            // 근처 면들과 서로 뛰어갈 수 있는지 잔상으로 보여줌
+            for o in plats() where o.id != f.id {
+                let gap = max(o.minX - f.maxX, f.minX - o.maxX, 0)
+                guard gap < 420, abs(o.y - f.y) < 420 else { continue }
+                // 초록: 여기로 올 수 있는 길, 파랑: 여기서 내려가는 길, 빨강: 여기로 못 옴
+                let come = edge(o, f), leave = edge(f, o)
+                if let e = come { drawArc(c, e.jump, ok: true) }
+                if let e = leave, come == nil || abs(o.y - f.y) > 30 { drawArc(c, e.jump, ok: false) }
+                if come == nil {
+                    // 못 가는 사이는 빨간 점선
+                    let ax = min(max(f.minX + f.maxX, 2 * o.minX), 2 * o.maxX) / 2
+                    let bx = min(max(o.minX + o.maxX, 2 * f.minX), 2 * f.maxX) / 2
+                    drawMiss(c, CGPoint(x: ax, y: o.y), CGPoint(x: bx, y: f.y))
+                }
+            }
+            label = (CGPoint(x: (f.minX + f.maxX) / 2, y: f.y + 70), reachable(from: nil, to: f.id, extra: extra))
+        }
+        if let (p, ok) = label {
+            let text = ok ? "✓ 다람쥐가 여기까지 올 수 있어요" : "✗ 여기는 못 와요 (너무 높거나 멀어요)"
+            drawTag(c, text, at: CGPoint(x: p.x - origin.x, y: p.y - origin.y), ok: ok)
+        }
+    }
+
+    // 점프 궤적을 따라 다람쥐 잔상
+    func drawArc(_ c: CGContext, _ j: Jump, ok: Bool) {
+        let color = ok ? CGColor(red: 0.2, green: 0.62, blue: 0.3, alpha: 0.85)
+            : CGColor(red: 0.3, green: 0.5, blue: 0.85, alpha: 0.7)
+        c.saveGState()
+        c.setStrokeColor(color)
+        c.setLineWidth(2)
+        c.setLineDash(phase: 0, lengths: [5, 4])
+        for i in 0...24 {
+            let p = j.point(j.T * CGFloat(i) / 24)
+            let q = CGPoint(x: p.x - origin.x, y: p.y - origin.y + 14)
+            if i == 0 { c.move(to: q) } else { c.addLine(to: q) }
+        }
+        c.strokePath()
+        c.restoreGState()
+        let img = sprite(.side(1, false))
+        let w = CGFloat(img.width) * P * 0.55, h = CGFloat(img.height) * P * 0.55
+        let n = 4
+        for i in 1...n {
+            let t = CGFloat(i) / CGFloat(n)
+            let p = j.point(j.T * t)
+            c.saveGState()
+            c.setAlpha((ok ? 0.12 : 0.06) + (ok ? 0.38 : 0.2) * t)
+            c.translateBy(x: p.x - origin.x, y: p.y - origin.y)
+            c.scaleBy(x: j.v.dx >= 0 ? 1 : -1, y: 1)
+            c.draw(img, in: CGRect(x: -w / 2, y: 0, width: w, height: h))
+            c.restoreGState()
+        }
+    }
+
+    func drawMiss(_ c: CGContext, _ a: CGPoint, _ b: CGPoint) {
+        let pa = CGPoint(x: a.x - origin.x, y: a.y - origin.y + 10), pb = CGPoint(x: b.x - origin.x, y: b.y - origin.y + 10)
+        c.saveGState()
+        c.setStrokeColor(CGColor(red: 0.85, green: 0.25, blue: 0.25, alpha: 0.75))
+        c.setLineWidth(2)
+        c.setLineDash(phase: 0, lengths: [3, 5])
+        c.move(to: pa)
+        c.addLine(to: pb)
+        c.strokePath()
+        c.restoreGState()
+        let mid = CGPoint(x: (pa.x + pb.x) / 2 - 5, y: (pa.y + pb.y) / 2 - 8)
+        ("✕" as NSString).draw(at: mid, withAttributes: [.font: NSFont.boldSystemFont(ofSize: 13),
+                                                          .foregroundColor: NSColor.systemRed])
+    }
+
+    func drawTag(_ c: CGContext, _ text: String, at p: CGPoint, ok: Bool) {
+        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.boldSystemFont(ofSize: 12), .foregroundColor: NSColor.white]
+        let size = (text as NSString).size(withAttributes: attrs)
+        let r = CGRect(x: (p.x - size.width / 2 - 8).rounded(), y: p.y.rounded(), width: size.width + 16, height: size.height + 6)
+        c.setFillColor(ok ? CGColor(red: 0.2, green: 0.6, blue: 0.3, alpha: 0.92) : CGColor(red: 0.8, green: 0.25, blue: 0.25, alpha: 0.92))
+        c.addPath(CGPath(roundedRect: r, cornerWidth: 6, cornerHeight: 6, transform: nil))
+        c.fillPath()
+        (text as NSString).draw(at: CGPoint(x: r.minX + 8, y: r.minY + 3), withAttributes: attrs)
+    }
+}
+
+final class MapEditor: NSObject {
+    var tool: ObjKind?
+    var erasing = false
+    var focus: MapObj?
+    var onPlace: ((ObjKind, CGPoint) -> Void)?
+    var onErase: ((MapObj) -> Void)?
+    var onChange: (() -> Void)?
+    var onDone: (() -> Void)?
+    private var panel: NSPanel?
+    private var overlay: NSWindow?
+    let overlayView = OverlayView()
+    private var buttons: [NSButton] = []
+    private var hintLabel: NSTextField!
+
+    func show() {
+        if panel == nil { build() }
+        let f = NSScreen.screens[0].frame
+        overlay!.setFrame(f, display: false)
+        overlayView.frame = NSRect(origin: .zero, size: f.size)
+        overlayView.origin = f.origin
+        overlay!.orderFrontRegardless()
+        panel!.orderFrontRegardless()
+        select(nil)
+    }
+
+    func hide() {
+        panel?.orderOut(nil)
+        overlay?.orderOut(nil)
+        tool = nil
+        erasing = false
+        focus = nil
+    }
+
+    func tick() { overlayView.needsDisplay = true }
+
+    private func build() {
+        let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 210, height: 420),
+                        styleMask: [.titled, .closable, .utilityWindow, .nonactivatingPanel],
+                        backing: .buffered, defer: false)
+        p.title = "맵 꾸미기"
+        p.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
+        p.becomesKeyOnlyIfNeeded = true
+        p.hidesOnDeactivate = false
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        p.delegate = self
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        for (i, k) in ObjKind.allCases.enumerated() {
+            let b = NSButton(title: k.title, target: self, action: #selector(pick(_:)))
+            b.setButtonType(.pushOnPushOff)
+            b.bezelStyle = .rounded
+            b.tag = i
+            buttons.append(b)
+            stack.addArrangedSubview(b)
+        }
+        let eraser = NSButton(title: "지우개", target: self, action: #selector(pick(_:)))
+        eraser.setButtonType(.pushOnPushOff)
+        eraser.bezelStyle = .rounded
+        eraser.tag = 99
+        buttons.append(eraser)
+        stack.addArrangedSubview(eraser)
+        hintLabel = NSTextField(wrappingLabelWithString: "")
+        hintLabel.font = .systemFont(ofSize: 11)
+        hintLabel.textColor = .secondaryLabelColor
+        hintLabel.preferredMaxLayoutWidth = 186
+        stack.addArrangedSubview(hintLabel)
+        let done = NSButton(title: "다 꾸몄어요", target: self, action: #selector(finish))
+        done.bezelStyle = .rounded
+        done.keyEquivalent = "\r"
+        stack.addArrangedSubview(done)
+        p.contentView = stack
+        let vf = NSScreen.screens[0].visibleFrame
+        p.setFrameTopLeftPoint(NSPoint(x: vf.maxX - 240, y: vf.maxY - 40))
+        panel = p
+
+        let o = NSWindow(contentRect: NSScreen.screens[0].frame, styleMask: .borderless, backing: .buffered, defer: false)
+        o.isOpaque = false
+        o.backgroundColor = .clear
+        o.hasShadow = false
+        o.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue - 1)
+        o.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        o.contentView = overlayView
+        overlay = o
+    }
+
+    @objc func pick(_ b: NSButton) {
+        select(b.state == .on ? b.tag : nil)
+    }
+
+    // 고른 도구 (99는 지우개, nil이면 옮기기만)
+    func select(_ tag: Int?) {
+        tool = tag.flatMap { $0 < ObjKind.allCases.count ? ObjKind.allCases[$0] : nil }
+        erasing = tag == 99
+        for b in buttons { b.state = b.tag == tag ? .on : .off }
+        hintLabel?.stringValue = tool.map { "\($0.hint)\n바탕화면을 누르면 놓여요." }
+            ?? (erasing ? "지울 오브젝트를 누르세요." :
+                "오브젝트를 골라 놓고, 놓은 건 끌어서 옮겨요. 우클릭하면 지워요.\n초록 잔상: 여기로 뛰어올 수 있는 길\n파란 잔상: 여기서 내려가는 길\n빨간 점선: 너무 높거나 멀어서 못 오는 사이")
+    }
+
+    @objc func finish() { onDone?() }
+}
+
+extension MapEditor: NSWindowDelegate {
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        onDone?()
+        return false
+    }
+}
+
+let mapEditor = MapEditor()
+
 // 다람쥐가 가려는 곳
 enum Goal: Equatable {
     case acorn(ObjectIdentifier), mouse, approach, tag, flee, stash(CGFloat), trash, home, visit
+    case feeder(Int), obj(Int)
 }
 // 도착해서 하는 일
 enum Chore { case bury, unbury(CGFloat), trash }
@@ -1925,6 +2495,11 @@ final class Pet {
     var insideTime: CGFloat = 0     // 낮에 잠깐 들른 거면 남은 시간
     var wantsVisit = false
     var visitCheck = rnd(90, 240)
+    var objGoal: Int? { didSet { if objGoal != oldValue { objX = nil } } }  // 혼자 놀러 가는 오브젝트
+    var objX: CGFloat?              // 발판 위 어디쯤으로 갈지
+    var objCheck = rnd(15, 30)
+    var navFail: CGFloat = 0        // 못 가는 곳이었으면 잠깐 포기
+    var bounceCool: CGFloat = 0
     private var chaseCool: CGFloat = 0
     private var calm: CGFloat = 0
     private var mouseSpeed: CGFloat = 0
@@ -2072,6 +2647,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusLine: NSMenuItem!
     var stashItem: NSMenuItem!
     var houseItem: NSMenuItem!
+    var editItem: NSMenuItem!
+    var feederTick: CGFloat = 120
     var petsHeader: NSMenuItem!
     var shown = true
     var last = CACurrentMediaTime()
@@ -2120,6 +2697,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         stashItem = menu.addItem(withTitle: "", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
         houseItem = menu.addItem(withTitle: "다람쥐 집 꾸미기", action: nil, keyEquivalent: "")
+        editItem = menu.addItem(withTitle: "맵 꾸미기 (발판, 사료통…)", action: #selector(toggleEdit), keyEquivalent: "e")
+        editItem.target = self
         menu.addItem(.separator())
         petsHeader = menu.addItem(withTitle: "우리 다람쥐들 (성격 바꾸기)", action: nil, keyEquivalent: "")
         menu.addItem(withTitle: "다람쥐 한 마리 더", action: #selector(addPet), keyEquivalent: "n").target = self
@@ -2133,6 +2712,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         house.view.menuMaker = { [unowned self] in self.houseMenu() }
         house.view.onKnock = { [unowned self] in self.knock() }
         mounds = needs.stash.map { Prop(.mound, at: CGPoint(x: $0, y: groundY(at: $0))) }
+        loadMap()
+        mapEditor.onPlace = { [unowned self] k, p in
+            let o = MapObj(k, at: p)
+            mapObjs.append(o)
+            o.window.orderFrontRegardless()
+            self.mapChanged()
+        }
+        mapEditor.onErase = { [unowned self] o in
+            mapObjs.removeAll { $0 === o }
+            o.window.orderOut(nil)
+            self.mapChanged()
+        }
+        mapEditor.onChange = { [unowned self] in self.mapChanged() }
+        mapEditor.onDone = { [unowned self] in if editing { self.toggleEdit() } }
         // 지난번에 있던 다람쥐들이 그대로 돌아옴
         let saved = UserDefaults.standard.array(forKey: "squirrels") as? [[String]] ?? []
         for s in saved where s.count == 2 { spawn(name: s[0], personality: Personality(rawValue: s[1]) ?? .playful) }
@@ -2162,6 +2755,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 pets.filter { !$0.inside }.randomElement()?.sq.say(news, 2.5)
             }
             acorns.forEach { $0.tick(dt) }
+            for a in acorns where a.absorbed {
+                // 사료통 안으로 쏙
+                a.window.orderOut(nil)
+                if let f = a.into { f.acorns = min(feederCapacity, f.acorns + 1) }
+            }
+            acorns.removeAll { $0.absorbed }
+            tickMap(dt)
             plan(dt)
             updatePlay(dt)
             // 노래쟁이가 있으면 걔가 가사를 부르고, 없으면 첫째가
@@ -2321,7 +2921,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshWindows()
         house.window.level = petLevel()
         if shown && house.shown { house.window.orderFrontRegardless() }
-        for w in pets.filter({ !$0.inside }).map(\.window) + props {
+        for w in mapObjs.map(\.window) + pets.filter({ !$0.inside }).map(\.window) + props {
             w.level = petLevel()
             if shown { w.orderFrontRegardless() }
         }
@@ -2343,6 +2943,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func giveAcorn() {
         if !shown { toggle() }
         guard let pet = pets.randomElement() else { return }
+        // 사료통이 있으면 반쯤은 사료통 안으로 떨어짐
+        if let f = mapObjs.filter({ $0.kind == .feeder && $0.acorns < feederCapacity }).randomElement(), rnd(0, 1) < 0.5 {
+            let a = Acorn(at: CGPoint(x: f.pos.x, y: screenBounds(for: f.pos).maxY - 40))
+            a.into = f
+            acorns.append(a)
+            return
+        }
         let from = pet.inside ? CGPoint(x: house.doorX, y: groundY(at: house.doorX) + 100) : pet.sq.pos
         let b = screenBounds(for: from)
         let x = min(max(from.x + rnd(-260, 260), b.minX + 90), b.maxX - 90)
@@ -2366,7 +2973,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let sq = pet.sq
             if pet.inside {
                 // 자러 들어간 거면 일어날 시간까지, 놀러 들어간 거면 잠깐만. 도토리가 떨어지면 뛰쳐나옴
-                if !acorns.isEmpty {
+                if !freeAcorns.isEmpty {
                     leaveHome(pet, say: "도토리 소리!")
                 } else if pet.insideTime > 0 {
                     pet.insideTime -= dt
@@ -2396,11 +3003,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
 
+            sq.keepSurface = false
+            pet.navFail -= dt
+            pet.bounceCool -= dt
+            bounce(pet)
+            if idle && pet.objGoal == nil && !sq.bedtime {
+                pet.objCheck -= dt
+                if pet.objCheck <= 0 {
+                    pet.objCheck = rnd(15, 35)
+                    pet.objGoal = pickObject(for: pet)
+                }
+            }
+
             let b = screenBounds(for: sq.pos)
             let shy = sq.personality == .shy
             var goal: Goal?
+            var nav: (x: CGFloat, plat: Int?)?
             var x: CGFloat = 0, rush: CGFloat = 95
-            if let a = acorns.min(by: { abs($0.pos.x - sq.pos.x) < abs($1.pos.x - sq.pos.x) }) {
+            if let a = freeAcorns.min(by: { abs($0.pos.x - sq.pos.x) < abs($1.pos.x - sq.pos.x) }) {
                 // 먹보는 도토리를 보면 전속력
                 goal = .acorn(ObjectIdentifier(a)); x = a.pos.x; rush = sq.personality == .glutton ? 150 : 95
             } else if pet.chaseTime > 0 {
@@ -2414,6 +3034,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 goal = .tag; x = p.runner.sq.pos.x; rush = 150
             } else if let p = play, p.runner === pet {
                 goal = .flee; x = sq.pos.x + (sq.pos.x >= p.chaser.sq.pos.x ? 200 : -200); rush = 120
+            } else if let f = feeder(for: pet) {
+                goal = .feeder(f.id); nav = (f.pos.x, objPlat(f)); rush = sq.personality == .glutton ? 140 : 90
             } else if needs.hungry, let s = needs.stash.min(by: { abs($0 - sq.pos.x) < abs($1 - sq.pos.x) }) {
                 goal = .stash(s); x = s; rush = 80
             } else if world.trashed && i == 0 {
@@ -2424,6 +3046,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 x = house.style == .nest ? house.x + [0, -26, 26, -13, 13][i % 5] : house.doorX
             } else if house.shown && pet.wantsVisit {
                 goal = .visit; x = house.doorX; rush = 70
+            } else if let id = pet.objGoal, let o = mapObjs.first(where: { $0.id == id }) {
+                goal = .obj(id); rush = 85
+                if o.kind.isPlatform && pet.objX == nil { pet.objX = rnd(o.frame.minX + 20, o.frame.maxX - 20) }
+                nav = o.kind.isPlatform ? (pet.objX!, o.id) : (o.pos.x, objPlat(o))
+            } else {
+                pet.objGoal = nil
             }
             // 집은 다른 화면에 있을 수도 있으니 화면 끝에 막히지 않게
             if goal != .home && goal != .visit { x = min(max(x, b.minX + 80), b.maxX - 80) }
@@ -2438,11 +3066,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 case .trash?: sq.say("방금 뭐 버렸어?", 2)
                 case .home?: sq.say(house.style == .nest ? "졸려… 둥지 가야지" : "졸려… 집에 가야지", 2)
                 case .visit?: sq.say("집에 잠깐 다녀올게~", 2)
+                case .feeder?: sq.say("사료통에 밥 먹으러~", 2)
+                case .obj(let id)?:
+                    switch mapObjs.first(where: { $0.id == id })?.kind {
+                    case .trampoline?: sq.say("트램펄린 타야지!", 1.6)
+                    case .cushion?: sq.say("방석에서 쉴래~", 1.6)
+                    default: sq.say("저기 올라가 볼까?", 1.6)
+                    }
                 default: break
                 }
             }
-            sq.target = goal == nil ? nil : x
             sq.rush = rush
+            if let n = nav, let g = goal {
+                switch navigate(sq, x: n.x, on: n.plat) {
+                case .walking: break
+                case .arrived: arrive(pet, g)
+                case .unreachable:
+                    // 맵이 바뀌어서 못 가게 됐으면 포기
+                    pet.goal = nil
+                    pet.objGoal = nil
+                    pet.navFail = 40
+                    sq.target = nil
+                    sq.say("저기는 못 가겠어…", 1.6)
+                }
+                continue
+            }
+            sq.target = goal == nil ? nil : x
             guard let g = goal, sq.mode == .floor, sq.surface == nil else { continue }
             let dx = abs(x - sq.pos.x)
 
@@ -2513,9 +3162,168 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             case .visit:
                 if dx < 8 { enterHome(pet, for: rnd(15, 40)) }
-            case .approach, .flee:
+            case .approach, .flee, .feeder, .obj:
                 break
             }
+        }
+    }
+
+    var freeAcorns: [Acorn] { acorns.filter { $0.into == nil } }
+
+    // MARK: 맵
+
+    enum Nav { case walking, arrived, unreachable }
+
+    // 같은 면이면 걸어가고, 다른 면이면 갈 수 있는 길을 찾아서 폴짝
+    func navigate(_ sq: Squirrel, x: CGFloat, on target: Int?) -> Nav {
+        guard sq.mode == .floor else {
+            if sq.jump == nil { sq.target = x }
+            return .walking
+        }
+        // 앱 창이나 위젯 위면 일단 내려옴
+        if let h = sq.surface, h >= 0 {
+            sq.target = x
+            return .walking
+        }
+        if sq.surface == target {
+            sq.keepSurface = true
+            sq.target = x
+            return abs(x - sq.pos.x) < 8 ? .arrived : .walking
+        }
+        guard let hop = firstHop(from: sq.surface, to: target) else { return .unreachable }
+        sq.keepSurface = true
+        sq.target = hop.take
+        if abs(hop.take - sq.pos.x) < 6 {
+            sq.target = nil
+            sq.leap(hop.jump)
+        }
+        return .walking
+    }
+
+    func arrive(_ pet: Pet, _ g: Goal) {
+        let sq = pet.sq
+        pet.goal = nil
+        sq.target = nil
+        switch g {
+        case .feeder(let id):
+            guard let f = mapObjs.first(where: { $0.id == id }), f.acorns > 0 else { return sq.say("비었네…", 1.4) }
+            f.acorns -= 1
+            sq.startEating()
+            eaten += 1
+        case .obj(let id):
+            pet.objGoal = nil
+            switch mapObjs.first(where: { $0.id == id })?.kind {
+            case .cushion?:
+                sq.sleeping = true
+                sq.targetSpeed = 0
+                sq.timer = rnd(15, 30)
+                sq.say("푹신하다~", 1.6)
+            case .plank?, .longPlank?:
+                if rnd(0, 1) < 0.5 { sq.say(["높다~!", "여기 좋다!", "경치 좋네~"].randomElement()!, 1.6) }
+            default:
+                break
+            }
+        default:
+            break
+        }
+    }
+
+    // 배고프고 갈 수 있는 사료통에 도토리가 있으면 거기로
+    func feeder(for pet: Pet) -> MapObj? {
+        let sq = pet.sq
+        guard pet.navFail <= 0, needs.hunger > (sq.personality == .glutton ? 0.25 : 0.45) else { return nil }
+        let here = (sq.surface ?? 0) < 0 ? sq.surface : nil
+        return mapObjs.filter { $0.kind == .feeder && $0.acorns > 0 && reachable(from: here, to: objPlat($0)) }
+            .min { abs($0.pos.x - sq.pos.x) < abs($1.pos.x - sq.pos.x) }
+    }
+
+    // 심심하면 성격에 맞는 오브젝트로 놀러 감
+    func pickObject(for pet: Pet) -> Int? {
+        let sq = pet.sq
+        guard pet.navFail <= 0 else { return nil }
+        let here = (sq.surface ?? 0) < 0 ? sq.surface : nil
+        let ok = mapObjs.filter { $0.kind != .feeder && $0.kind != .flowerPot && $0.kind != .lamp }
+            .filter { o in o.id != here && reachable(from: here, to: objPlat(o)) }
+        let tramps = ok.filter { $0.kind == .trampoline }, cushions = ok.filter { $0.kind == .cushion }
+        let planks = ok.filter { $0.kind.isPlatform }
+        switch sq.personality {
+        case .playful: return (tramps + tramps + planks).randomElement()?.id
+        case .sleepy: return (cushions.randomElement() ?? planks.randomElement())?.id
+        default: return rnd(0, 1) < 0.6 ? ok.randomElement()?.id : nil
+        }
+    }
+
+    // 트램펄린을 밟으면 높이 튀어 오름
+    func bounce(_ pet: Pet) {
+        let sq = pet.sq
+        guard sq.mode == .floor, pet.bounceCool <= 0, (sq.surface ?? -1) < 0 || sq.surface == nil else { return }
+        for t in mapObjs where t.kind == .trampoline && objPlat(t) == sq.surface && abs(t.pos.x - sq.pos.x) < 18 {
+            pet.bounceCool = 1.2
+            if case .obj(let id)? = pet.goal, id == t.id { pet.goal = nil; pet.objGoal = nil }
+            sq.target = nil
+            sq.hop(CGVector(dx: sq.dir * 120, dy: 1150))
+            sq.say(["뿅~!", "슝~!", "야호!"].randomElement()!, 1.2)
+            needs.cheer(0.02)
+            return
+        }
+    }
+
+    // 사료통 채우기, 가로등 켜기, 맵 꾸미기 화면 다시 그리기
+    func tickMap(_ dt: CGFloat) {
+        feederTick -= dt
+        if feederTick <= 0 {
+            feederTick = 120
+            for f in mapObjs where f.kind == .feeder && f.acorns < feederCapacity { f.acorns += 1 }
+            saveMap()
+        }
+        for l in mapObjs where l.kind == .lamp { l.lit = world.night }
+        if editing { mapEditor.tick() }
+    }
+
+    func mapChanged() {
+        // 발판이 사라지거나 옮겨지면 그 위의 오브젝트는 아래로 떨어짐
+        customWins = mapObjs.filter { $0.kind.isPlatform }.map { Win(id: $0.id, frame: $0.frame, kind: .custom) }
+        for o in mapObjs where !o.kind.isPlatform {
+            o.pos = snapped(o.kind, o.pos)
+            o.place()
+        }
+        refreshWindows()
+        saveMap()
+    }
+
+    func saveMap() {
+        let rows = mapObjs.map { [$0.kind.rawValue, "\(Double($0.pos.x))", "\(Double($0.pos.y))", "\($0.acorns)"] }
+        UserDefaults.standard.set(rows, forKey: "mapObjects")
+    }
+
+    func loadMap() {
+        let rows = UserDefaults.standard.array(forKey: "mapObjects") as? [[String]] ?? []
+        for r in rows where r.count == 4 {
+            guard let k = ObjKind(rawValue: r[0]), let x = Double(r[1]), let y = Double(r[2]) else { continue }
+            let o = MapObj(k, at: CGPoint(x: x, y: y), acorns: Int(r[3]) ?? 0)
+            mapObjs.append(o)
+            if shown { o.window.orderFrontRegardless() }
+        }
+        mapChanged()
+    }
+
+    // 맵 꾸미기: 모든 걸 앱 창 위로 올리고 팔레트와 미리보기를 띄움
+    @objc func toggleEdit() {
+        if !shown { toggle() }
+        editing.toggle()
+        editItem.state = editing ? .on : .off
+        let all = [house.window] + mapObjs.map(\.window) + props + pets.filter { !$0.inside }.map(\.window)
+        for w in all {
+            w.level = petLevel()
+            if w.isVisible || w !== house.window { w.orderFrontRegardless() }
+        }
+        if !house.shown { house.window.orderOut(nil) }
+        for o in mapObjs { o.window.ignoresMouseEvents = !editing }
+        if editing {
+            mapEditor.show()
+        } else {
+            mapEditor.hide()
+            saveMap()
         }
     }
 
@@ -2581,7 +3389,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.appearsDisabled = !shown
         if shown && house.shown { house.window.orderFrontRegardless() } else { house.window.orderOut(nil) }
         for p in pets where !p.inside { shown ? p.window.orderFrontRegardless() : p.window.orderOut(nil) }
-        for w in props { shown ? w.orderFrontRegardless() : w.orderOut(nil) }
+        for w in props + mapObjs.map(\.window) { shown ? w.orderFrontRegardless() : w.orderOut(nil) }
+        if !shown && editing { toggleEdit() }
     }
 
     @discardableResult
@@ -2653,6 +3462,38 @@ func snapshot(_ dir: String) {
         try? rep.representation(using: .png, properties: [:])!
             .write(to: URL(fileURLWithPath: "\(dir)/house-\(style.rawValue).png"))
     }
+    // 맵 꾸미기 미리보기: 닿는 발판, 너무 높은 발판, 사료통
+    let f = floorPlat()
+    let base = CGPoint(x: f.minX + 200, y: f.y)
+    mapObjs = [MapObj(.plank, at: CGPoint(x: base.x + 120, y: base.y + 110)),
+               MapObj(.longPlank, at: CGPoint(x: base.x + 420, y: base.y + 200)),
+               MapObj(.trampoline, at: CGPoint(x: base.x + 640, y: base.y))]
+    mapObjs.append(MapObj(.feeder, at: CGPoint(x: base.x + 420, y: base.y + 212), acorns: 5))
+    customWins = mapObjs.filter { $0.kind.isPlatform }.map { Win(id: $0.id, frame: $0.frame, kind: .custom) }
+    for (name, tool, m) in [("map-ok", ObjKind.plank, CGPoint(x: base.x + 260, y: base.y + 230)),
+                            ("map-high", ObjKind.plank, CGPoint(x: base.x + 760, y: base.y + 330))] {
+        let v = OverlayView(frame: NSRect(x: 0, y: 0, width: 960, height: 520))
+        v.origin = CGPoint(x: base.x - 100, y: base.y - 20)
+        v.mouse = m
+        mapEditor.tool = tool
+        let bg = NSImage(size: v.bounds.size)
+        bg.lockFocus()
+        NSColor(white: 0.93, alpha: 1).setFill()
+        v.bounds.fill()
+        v.draw(v.bounds)
+        for o in mapObjs {
+            let img = sprite(o.pose)
+            NSGraphicsContext.current!.cgContext.interpolationQuality = .none
+            NSGraphicsContext.current!.cgContext.draw(img, in: CGRect(x: o.pos.x - o.artSize.width / 2 - P - v.origin.x,
+                y: o.pos.y - P - v.origin.y, width: CGFloat(img.width) * P, height: CGFloat(img.height) * P))
+        }
+        bg.unlockFocus()
+        let rep = NSBitmapImageRep(data: bg.tiffRepresentation!)!
+        try? rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
+    }
+    mapEditor.tool = nil
+    mapObjs = []
+    customWins = []
     for (name, pose) in [("nest", Pose.nest), ("mound", Pose.mound)] {
         let rep = NSBitmapImageRep(cgImage: sprite(pose))
         try? rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
