@@ -83,7 +83,7 @@ struct Jump {
     let T: CGFloat
     let surface: Int?       // 내려앉을 발판 (바닥이면 nil)
     var t: CGFloat = 0
-    enum Kind { case arc, climb, warp }
+    enum Kind { case arc, climb, warp, slide }
     var kind: Kind = .arc   // 포물선 점프, 사다리 타기, 포털
     var to: CGPoint = .zero // 포털이면 나오는 곳
 
@@ -91,6 +91,7 @@ struct Jump {
         switch kind {
         case .arc: return CGPoint(x: from.x + v.dx * t, y: from.y + v.dy * t - gravity * t * t / 2)
         case .climb: return CGPoint(x: from.x, y: from.y + v.dy * t)
+        case .slide: return CGPoint(x: from.x + v.dx * t, y: from.y + v.dy * t)
         case .warp: return to
         }
     }
@@ -2060,7 +2061,8 @@ final class House {
 
 enum ObjKind: String, CaseIterable {
     case plank, longPlank, cloud, crate, ladder, portal
-    case feeder, water, trampoline, cannon, wheel, flowerPot, lamp
+    case feeder, water, tree, trampoline, cannon, wheel, slide, ball, campfire, speaker, mirror
+    case flowerPot, lamp, mushroom, bush, fence
 
     var title: String {
         switch self {
@@ -2077,6 +2079,15 @@ enum ObjKind: String, CaseIterable {
         case .wheel: return "쳇바퀴"
         case .flowerPot: return "화분"
         case .lamp: return "가로등"
+        case .tree: return "도토리 나무"
+        case .slide: return "미끄럼틀"
+        case .ball: return "공"
+        case .campfire: return "모닥불"
+        case .speaker: return "스피커"
+        case .mirror: return "거울"
+        case .mushroom: return "버섯"
+        case .bush: return "덤불"
+        case .fence: return "울타리"
         }
     }
 
@@ -2093,11 +2104,20 @@ enum ObjKind: String, CaseIterable {
         case .cannon: return "들어가면 펑! 하고 멀리 날아가요"
         case .wheel: return "올라타서 달리기 운동을 해요"
         case .flowerPot, .lamp: return "꾸미기용 (가로등은 밤에 켜져요)"
+        case .tree: return "가끔 도토리가 하나씩 떨어져요"
+        case .slide: return "올라가서 슈웅~ 타고 내려와요"
+        case .ball: return "다람쥐가 뻥 차고, 지나가다 건드리면 굴러가요"
+        case .campfire: return "와서 불을 쬐면 기분이 좋아져요"
+        case .speaker: return "노래가 나오면 앞에 와서 춤을 춰요"
+        case .mirror: return "와서 자기 모습을 구경해요"
+        case .mushroom, .bush, .fence: return "꾸미기용"
         }
     }
 
     // 위에 올라설 수 있음
-    var isPlatform: Bool { [.plank, .longPlank, .cloud, .crate, .ladder].contains(self) }
+    var isPlatform: Bool { [.plank, .longPlank, .cloud, .crate, .ladder, .slide].contains(self) }
+    // 심심할 때 놀러 가는 곳
+    var visitable: Bool { ![.feeder, .flowerPot, .lamp, .tree, .mushroom, .bush, .fence].contains(self) }
     // 공중에 띄워 놓음 (아니면 아래 면에 내려앉음)
     var floats: Bool { [.plank, .longPlank, .cloud].contains(self) }
 
@@ -2150,6 +2170,42 @@ enum ObjKind: String, CaseIterable {
             }
             g.append("VV..........VV")
             return g
+        case .tree:
+            var g: [[Character]] = (0..<14).map { y in
+                (0..<16).map { x -> Character in
+                    let dx = (CGFloat(x) - 7.5) / 8, dy = (CGFloat(y) - 6.5) / 7
+                    guard dx * dx + dy * dy <= 1 else { return "." }
+                    return dx + dy > 0.55 ? "K" : "L"
+                }
+            }
+            for (x, y) in [(4, 4), (10, 3), (7, 8), (12, 8), (3, 9)] { g[y][x] = "a"; g[y + 1][x] = "b" }
+            return g.map { String($0) } + Array(repeating: "......VWWV......", count: 7) + [".....VVWWVV....."]
+        case .slide:
+            return (0..<16).map { y in
+                String((0..<22).map { x -> Character in
+                    if y == 0 { return x < 9 ? "r" : "." }
+                    let sx = 8 + Int(CGFloat(y - 1) * 0.8)
+                    if x >= sx && x < sx + 3 { return x == sx + 2 ? "j" : "l" }
+                    if x == 0 || x == 7 { return "V" }
+                    return x < 7 && y % 3 == 1 ? "W" : "."
+                })
+            }
+        case .ball: return [".rrrr.", "rrRRrr", "rRRrrr", "rrrrRr", "rrrrrr", ".rrrr."]
+        case .campfire:
+            let fire = n % 2 == 0
+                ? ["....r.....", "...rjr....", "..rjjr.r..", "..rjjjrr..", ".rjjhjjr.."]
+                : [".....r....", "....rjr...", "..r.rjjr..", "..rrjjjr..", "..rjjhjjr."]
+            return fire + ["VVrjjjjrVV", ".VVVVVVVV.", "VV......VV"]
+        case .speaker:
+            return ["oooooooo", "oZZZZZZo", "oZZooZZo", "oZZooZZo", "oZZZZZZo", "oZoooooo", "oZozzooo", "oZozzooo",
+                    "oZoooooo", "oooooooo"].map { $0.replacingOccurrences(of: "oZoooooo", with: "oZoooZZo") }
+        case .mirror:
+            return [".jjjjjj.", "jGGGGGGj", "jGhGGGGj", "jGGhGGGj", "jGGGGGGj", "jGGGGGGj", "jGGGGhGj", "jGGGGGGj",
+                    ".jjjjjj.", "...jj...", "...jj...", ".jjjjjj."]
+        case .mushroom: return [".rrrrr.", "rRrrRrr", "rrrRrrr", "..SSs..", "..SSs..", "..SSs.."]
+        case .bush: return ["...LLL..LLL.", ".LLLLLLLLLLK", "LLpLLLLLpLKK", "LLLLLpLLLLKK", "LLLLLLLLLKKK", ".LLKKLLKKKK."]
+        case .fence: return ["W...W...W...W", "W...W...W...W", "WWWWWWWWWWWWW", "W...W...W...W", "VVVVVVVVVVVVV",
+                              "W...W...W...W", "V...V...V...V"]
         case .flowerPot: return [".p...j.", "pjp.jaj", ".pL..jL", "..LLLL.", ".PPPPP.", ".PPPPP.", "..PPP.."]
         case .lamp:
             let light = n == 1 ? "j" : "S"
@@ -2166,6 +2222,8 @@ enum ObjKind: String, CaseIterable {
     // pos(아래 가운데)에 놓였을 때 올라서는 면
     func plat(id: Int?, at p: CGPoint) -> Plat {
         let s = size, pad: CGFloat = self == .ladder ? 8 : 0
+        // 미끄럼틀은 왼쪽 꼭대기 단만
+        if self == .slide { return Plat(id: id, minX: p.x - s.width / 2, maxX: p.x - s.width / 2 + 9 * P, y: p.y + s.height) }
         return Plat(id: id, minX: p.x - s.width / 2 - pad, maxX: p.x + s.width / 2 + pad, y: p.y + s.height)
     }
 }
@@ -2242,6 +2300,7 @@ final class MapObj {
     var base: Int?              // 내려앉은 면 (바닥이면 nil)
     var acorns: Int { didSet { if acorns != oldValue { redraw() } } }
     var lit = false { didSet { if lit != oldValue { redraw() } } }
+    var vx: CGFloat = 0         // 공이 굴러가는 속도
     var spin = 0 { didSet { if spin != oldValue { redraw() } } }
     let window: NSWindow
     let view = ObjView()
@@ -2269,7 +2328,7 @@ final class MapObj {
         switch kind {
         case .feeder: return .obj(kind, acorns)
         case .lamp: return .obj(kind, lit ? 1 : 0)
-        case .wheel: return .obj(kind, spin)
+        case .wheel, .campfire: return .obj(kind, spin)
         default: return .obj(kind, 0)
         }
     }
@@ -2284,7 +2343,7 @@ final class MapObj {
     // 떨어지던 다람쥐가 걸리는 자리 (사다리는 맨 위 칸만)
     var landing: CGRect {
         let p = plat
-        if kind == .ladder { return CGRect(x: p.minX, y: p.y - 8, width: p.maxX - p.minX, height: 8) }
+        if kind == .ladder || kind == .slide { return CGRect(x: p.minX, y: p.y - 8, width: p.maxX - p.minX, height: 8) }
         return frame
     }
 
@@ -2745,9 +2804,9 @@ final class MapEditor: NSObject {
         tiles.append(tile("지우개", NSImage(systemSymbolName: "eraser", accessibilityDescription: nil),
                           tag: MapEditor.eraserTag, tip: "누른 오브젝트를 지워요"))
         var rows: [[NSView]] = []
-        for i in stride(from: 0, to: tiles.count, by: 3) {
-            var row: [NSView] = Array(tiles[i..<min(i + 3, tiles.count)])
-            while row.count < 3 { row.append(NSGridCell.emptyContentView) }
+        for i in stride(from: 0, to: tiles.count, by: 4) {
+            var row: [NSView] = Array(tiles[i..<min(i + 4, tiles.count)])
+            while row.count < 4 { row.append(NSGridCell.emptyContentView) }
             rows.append(row)
         }
         let grid = NSGridView(views: rows)
@@ -2761,7 +2820,7 @@ final class MapEditor: NSObject {
         hintLabel = NSTextField(wrappingLabelWithString: "")
         hintLabel.font = .systemFont(ofSize: 11)
         hintLabel.textColor = .secondaryLabelColor
-        hintLabel.preferredMaxLayoutWidth = 240
+        hintLabel.preferredMaxLayoutWidth = 320
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
         hintLabel.heightAnchor.constraint(equalToConstant: 84).isActive = true
         stack.addArrangedSubview(hintLabel)
@@ -2964,6 +3023,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var houseItem: NSMenuItem!
     var editItem: NSMenuItem!
     var feederTick: CGFloat = 120
+    var treeTick: CGFloat = 60
     var petsHeader: NSMenuItem!
     var shown = true
     var last = CACurrentMediaTime()
@@ -3443,7 +3503,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 goal = .obj(id); rush = 85
                 if o.kind.isPlatform && pet.objX == nil {
                     let pl = o.plat, half = max(0, (pl.maxX - pl.minX) / 2 - 20)
-                    pet.objX = o.pos.x + rnd(-half, half)
+                    pet.objX = (pl.minX + pl.maxX) / 2 + rnd(-half, half)
                 }
                 nav = o.kind.isPlatform ? (pet.objX!, o.id) : (o.pos.x, objPlat(o))
             } else {
@@ -3467,6 +3527,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     switch mapObjs.first(where: { $0.id == id })?.kind {
                     case .trampoline?: sq.say("트램펄린 타야지!", 1.6)
                     case .cannon?: sq.say("대포 타볼까!", 1.6)
+                    case .slide?: sq.say("미끄럼틀 타야지!", 1.6)
+                    case .ball?: sq.say("공이다!", 1.4)
+                    case .campfire?: sq.say("불 쬐러 가야지~", 1.6)
+                    case .speaker?: sq.say("음악 소리다!", 1.6)
+                    case .mirror?: sq.say("거울 볼래~", 1.6)
                     case .wheel?: sq.say("운동하러 가야지!", 1.6)
                     case .water?: sq.say("목말라~", 1.6)
                     case .portal?: sq.say("포털 타고 슝~", 1.6)
@@ -3606,6 +3671,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .obj(let id):
             pet.objGoal = nil
             switch mapObjs.first(where: { $0.id == id })?.kind {
+            case .slide?:
+                // 꼭대기에서 바닥까지 미끄러져 내려옴
+                guard let o = mapObjs.first(where: { $0.id == id }) else { break }
+                let pl = o.plat, from = CGPoint(x: pl.maxX - 6, y: pl.y), end = CGPoint(x: o.frame.maxX + 4, y: o.pos.y)
+                let T: CGFloat = 0.7
+                sq.leap(Jump(from: from, v: CGVector(dx: (end.x - from.x) / T, dy: (end.y - from.y) / T), T: T,
+                             surface: o.base, kind: .slide))
+                sq.say("슈웅~!", 1.2)
+                needs.cheer(0.03)
+            case .ball?:
+                if let o = mapObjs.first(where: { $0.id == id }) {
+                    o.vx = (Bool.random() ? 1 : -1) * rnd(260, 420)
+                    sq.say("뻥!", 1)
+                    needs.cheer(0.02)
+                }
+            case .campfire?:
+                sq.say(["따뜻해~", "불멍 좋다…", "노곤노곤~"].randomElement()!, 2.2)
+                sq.happyTime = 2.5
+                needs.cheer(0.05)
+            case .speaker?:
+                sq.say(music.playing ? "둠칫둠칫~ ♪" : "노래 틀어줘~", 2)
+                if music.playing { sq.flip(); needs.cheer(0.04) }
+            case .mirror?:
+                sq.say(["나 좀 귀엽네?", "털 정리 좀 하고~", "거기 누구야?", "오늘도 멋져!"].randomElement()!, 2.2)
+                sq.happyTime = 1.5
             case .wheel?:
                 sq.runTime = rnd(4, 7)
                 sq.say("달려라 달려~!", 1.6)
@@ -3649,9 +3739,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let sq = pet.sq
         guard pet.navFail <= 0 else { return nil }
         let here = (sq.surface ?? 0) < 0 ? sq.surface : nil
-        let ok = mapObjs.filter { $0.kind != .feeder && $0.kind != .flowerPot && $0.kind != .lamp }
+        let ok = mapObjs.filter { $0.kind.visitable }
             .filter { o in o.id != here && reachable(from: here, to: objPlat(o)) }
-        let fun = ok.filter { [.trampoline, .cannon, .wheel, .portal].contains($0.kind) }
+        // 노래가 나오면 스피커 앞으로
+        if music.playing, singAlong, rnd(0, 1) < 0.6, let sp = ok.first(where: { $0.kind == .speaker }) { return sp.id }
+        let fun = ok.filter { [.trampoline, .cannon, .wheel, .portal, .slide, .ball].contains($0.kind) }
         let high = ok.filter { $0.kind.isPlatform }
         switch sq.personality {
         case .playful: return (fun + fun + high).randomElement()?.id
@@ -3695,6 +3787,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             saveMap()
         }
         for l in mapObjs where l.kind == .lamp { l.lit = world.night }
+        let now = CACurrentMediaTime()
+        for f in mapObjs where f.kind == .campfire { f.spin = Int(now * 6) % 2 }
+        // 공: 지나가던 다람쥐가 건드리면 굴러가고, 놓인 면 끝에서 튕김
+        for b in mapObjs where b.kind == .ball {
+            for p in pets where !p.inside && p.sq.mode == .floor && p.sq.surface == b.base && p.sq.speed > 20
+                && abs(p.sq.pos.x - b.pos.x) < 14 && abs(b.vx) < 40 {
+                b.vx = p.sq.dir * (p.sq.speed * 2 + 90)
+            }
+            guard abs(b.vx) > 4 else { continue }
+            b.pos.x += b.vx * dt
+            b.vx *= 1 - min(1, dt * 1.1)
+            if let pl = plats().first(where: { $0.id == b.base }) {
+                if b.pos.x < pl.minX + 12 { b.pos.x = pl.minX + 12; b.vx = abs(b.vx) * 0.6 }
+                if b.pos.x > pl.maxX - 12 { b.pos.x = pl.maxX - 12; b.vx = -abs(b.vx) * 0.6 }
+            }
+            b.place()
+        }
+        // 도토리 나무: 가끔 하나씩 툭
+        treeTick -= dt
+        if treeTick <= 0 {
+            treeTick = rnd(150, 240)
+            for t in mapObjs where t.kind == .tree && freeAcorns.count < 2 {
+                acorns.append(Acorn(at: CGPoint(x: t.pos.x + rnd(-24, 24), y: t.pos.y + 50)))
+            }
+        }
         for w in mapObjs where w.kind == .wheel {
             let on = pets.contains { $0.sq.runTime > 0 && abs($0.sq.pos.x - w.pos.x) < 20 }
             w.spin = on ? Int(CACurrentMediaTime() * 10) % 2 : 0
@@ -3920,7 +4037,12 @@ func snapshot(_ dir: String) {
                MapObj(.portal, at: CGPoint(x: base.x + 720, y: base.y + 400)),
                MapObj(.portal, at: CGPoint(x: base.x + 16, y: base.y)),
                MapObj(.water, at: CGPoint(x: base.x + 416, y: base.y + 210)),
-               MapObj(.wheel, at: CGPoint(x: base.x + 640, y: base.y)), MapObj(.cannon, at: CGPoint(x: base.x + 760, y: base.y))]
+               MapObj(.wheel, at: CGPoint(x: base.x + 640, y: base.y)), MapObj(.cannon, at: CGPoint(x: base.x + 760, y: base.y)),
+               MapObj(.slide, at: CGPoint(x: base.x + 240, y: base.y)), MapObj(.tree, at: CGPoint(x: base.x + 420, y: base.y)),
+               MapObj(.campfire, at: CGPoint(x: base.x + 500, y: base.y)), MapObj(.ball, at: CGPoint(x: base.x + 560, y: base.y)),
+               MapObj(.speaker, at: CGPoint(x: base.x + 820, y: base.y)), MapObj(.mirror, at: CGPoint(x: base.x + 860, y: base.y)),
+               MapObj(.mushroom, at: CGPoint(x: base.x + 64, y: base.y)), MapObj(.bush, at: CGPoint(x: base.x + 580, y: base.y + 204)),
+               MapObj(.fence, at: CGPoint(x: base.x + 700, y: base.y))]
     settleObjects()
     do {
         let v = OverlayView(frame: NSRect(x: 0, y: 0, width: 980, height: 640))
