@@ -1498,6 +1498,10 @@ final class PetView: NSView {
         lastDrag = nil; dragVel = .zero
     }
 
+    // 우클릭: 이 다람쥐를 골라서, 다음에 누르는 오브젝트로 보냄
+    var onPick: (() -> Void)?
+    override func rightMouseDown(with e: NSEvent) { onPick?() }
+
     override func mouseDragged(with e: NSEvent) {
         let p = NSEvent.mouseLocation
         if let (lp, lt) = lastDrag, e.timestamp > lt {
@@ -2409,6 +2413,10 @@ final class ObjView: NSView {
     private var grab = CGPoint.zero
     override func mouseDown(with e: NSEvent) {
         guard let obj = obj else { return }
+        if !editing {
+            commandObj?(obj)
+            return
+        }
         if mapEditor.erasing {
             mapEditor.onErase?(obj)
             return
@@ -2431,7 +2439,7 @@ final class ObjView: NSView {
         mapEditor.onChange?()
     }
     override func rightMouseDown(with e: NSEvent) {
-        if let obj = obj { mapEditor.onErase?(obj) }
+        if let obj = obj, editing { mapEditor.onErase?(obj) }
     }
 }
 
@@ -2504,6 +2512,10 @@ final class MapObj {
         window.setFrameOrigin(NSPoint(x: (pos.x - artSize.width / 2 - P).rounded(), y: pos.y - P))
     }
 }
+
+// 다람쥐를 우클릭해서 고른 동안: 오브젝트나 집을 누르면 여기로 알려줌
+var commandObj: ((MapObj) -> Void)?
+var commandHouse: ((House) -> Bool)?
 
 // 놓은 오브젝트들 (발판은 customWins로 창 목록에 끼워 넣음)
 var mapObjs: [MapObj] = []
@@ -3231,6 +3243,8 @@ final class Pet {
     var bounceCool: CGFloat = 0
     var stuckX: CGFloat = 0         // 길 찾아가다 한자리에서 맴도는지 보려고
     var stuckTime: CGFloat = 0
+    var order: Int?                 // 시켜서 가는 오브젝트
+    weak var orderHouse: House?     // 시켜서 가는 집
     private var chaseCool: CGFloat = 0
     private var calm: CGFloat = 0
     private var mouseSpeed: CGFloat = 0
@@ -3474,6 +3488,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             acorns.removeAll { $0.absorbed }
             tickMap(dt)
+            if picked != nil {
+                pickTime -= dt
+                if pickTime <= 0 || picked?.inside == true { endPick(say: nil) }
+            }
             plan(dt)
             updatePlay(dt)
             // 노래쟁이가 있으면 걔가 가사를 부르고, 없으면 첫째가
@@ -3526,6 +3544,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // MARK: 집
+
+    // MARK: 다람쥐에게 시키기 (다람쥐 우클릭 → 오브젝트나 집 클릭)
+
+    weak var picked: Pet?
+    var pickTime: CGFloat = 0
+    var clickMonitor: Any?
+
+    func pick(_ pet: Pet) {
+        if picked === pet { return endPick(say: "아니야?") }
+        endPick(say: nil)
+        guard !mapObjs.isEmpty || !houses.isEmpty else { return pet.sq.say("갈 데가 없어… 맵 꾸미기로 뭘 놓아줘!", 2.6) }
+        picked = pet
+        pickTime = 10
+        pet.sq.sleeping = false
+        pet.sq.nested = false
+        pet.sq.say("어디로 갈까? 눌러줘!", 10)
+        pet.sq.boing(-0.2)
+        // 누를 수 있다는 표시로 오브젝트들이 한 번 꿀렁
+        for o in mapObjs {
+            o.window.ignoresMouseEvents = false
+            o.bump()
+        }
+        commandObj = { [unowned self] o in self.send(to: o) }
+        commandHouse = { [unowned self] h in self.send(home: h) }
+        // 다른 데를 누르면 취소
+        clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            DispatchQueue.main.async { self?.endPick(say: nil) }
+        }
+    }
+
+    func endPick(say line: String?) {
+        guard let pet = picked else { return }
+        picked = nil
+        commandObj = nil
+        commandHouse = nil
+        if let m = clickMonitor { NSEvent.removeMonitor(m); clickMonitor = nil }
+        for o in mapObjs { o.window.ignoresMouseEvents = !editing }
+        if pet.sq.bubble == "어디로 갈까? 눌러줘!" { pet.sq.bubble = nil; pet.sq.bubbleTime = 0 }
+        if let line = line { pet.sq.say(line, 1.4) }
+    }
+
+    func send(to o: MapObj) {
+        guard let pet = picked else { return }
+        endPick(say: nil)
+        o.bump()
+        let here = (pet.sq.surface ?? 0) < 0 ? pet.sq.surface : nil
+        guard reachable(from: here, to: objPlat(o)) else { return pet.sq.say("저기는 못 가겠어…", 2) }
+        pet.order = o.id
+        pet.orderHouse = nil
+        pet.objGoal = nil
+        pet.navFail = 0
+        pet.goal = nil
+        pet.sq.say("\(o.kind.title)! 알았어!", 1.6)
+    }
+
+    func send(home h: House) -> Bool {
+        guard let pet = picked else { return false }
+        endPick(say: nil)
+        let here = (pet.sq.surface ?? 0) < 0 ? pet.sq.surface : nil
+        guard reachable(from: here, to: h.base) else { pet.sq.say("저기는 못 가겠어…", 2); return true }
+        pet.orderHouse = h
+        pet.order = nil
+        pet.navFail = 0
+        pet.goal = nil
+        pet.sq.say("집에 다녀올게!", 1.6)
+        return true
+    }
 
     // 이 다람쥐가 돌아갈 집: 자기 이름이 붙은 집, 없으면 주인 없는 집
     func home(for pet: Pet) -> House? {
@@ -3671,6 +3756,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // 똑똑: 안에 있으면 나오고, 없으면 주인(없으면 가까운 다람쥐)이 대답
     func knock(_ house: House) {
+        if commandHouse?(house) == true { return }
         if let p = pets.first(where: { $0.inside && $0.house === house }) {
             leaveHome(p, say: "누구세요?")
             p.visitCheck = rnd(120, 300)
@@ -3811,7 +3897,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             var goal: Goal?
             var nav: (x: CGFloat, plat: Int?)?
             var x: CGFloat = 0, rush: CGFloat = 95
-            if let a = freeAcorns.min(by: { abs($0.pos.x - sq.pos.x) < abs($1.pos.x - sq.pos.x) }) {
+            if pet.order != nil && !mapObjs.contains(where: { $0.id == pet.order }) { pet.order = nil }
+            if picked === pet {
+                // 어디로 갈지 기다리는 중
+                goal = nil
+                sq.target = nil
+                sq.targetSpeed = 0
+                pet.goal = nil
+                continue
+            } else if let id = pet.order, let o = mapObjs.first(where: { $0.id == id }) {
+                // 시킨 오브젝트로 곧장
+                goal = o.kind == .feeder ? .feeder(id) : .obj(id); rush = 130
+                if o.kind.isPlatform && pet.objX == nil {
+                    let pl = o.plat, half = max(0, (pl.maxX - pl.minX) / 2 - 20)
+                    pet.objX = (pl.minX + pl.maxX) / 2 + rnd(-half, half)
+                }
+                nav = o.kind.isPlatform ? (pet.objX!, o.id) : (o.pos.x, objPlat(o))
+            } else if let h = pet.orderHouse, houses.contains(where: { $0 === h }) {
+                goal = .visit; rush = 120
+                nav = (h.style == .nest ? h.x : h.doorX, h.base)
+            } else if let a = freeAcorns.min(by: { abs($0.pos.x - sq.pos.x) < abs($1.pos.x - sq.pos.x) }) {
                 // 먹보는 도토리를 보면 전속력
                 goal = .acorn(ObjectIdentifier(a)); x = a.pos.x; rush = sq.personality == .glutton ? 150 : 95
             } else if claudeReact, claude.state == .attention, sq.mode == .floor, !sq.nested, abs(m.x - sq.pos.x) > 140 {
@@ -3851,7 +3956,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
             if goal != pet.goal {
                 pet.goal = goal
-                switch goal {
+                switch pet.order != nil || pet.orderHouse != nil ? nil : goal {
                 case .acorn?: sq.say(sq.personality == .glutton ? "도토리!! 내 거!!" : "도토리다!")
                 case .approach?: sq.say("불렀어?")
                 case .stash?: sq.say("숨겨둔 도토리 먹어야지~", 2)
@@ -3890,6 +3995,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 pet.stuckTime = 0
                 pet.goal = nil
                 pet.objGoal = nil
+                pet.order = nil
+                pet.orderHouse = nil
                 pet.wantsVisit = false
                 pet.navFail = 30
                 sq.target = nil
@@ -3905,6 +4012,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     // 맵이 바뀌어서 못 가게 됐으면 포기
                     pet.goal = nil
                     pet.objGoal = nil
+                    pet.order = nil
+                    pet.orderHouse = nil
                     pet.wantsVisit = false
                     pet.navFail = 40
                     sq.target = nil
@@ -4007,7 +4116,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func arrive(_ pet: Pet, _ g: Goal) {
         let sq = pet.sq
+        let ordered = pet.order != nil
         pet.goal = nil
+        pet.order = nil
         sq.target = nil
         switch g {
         case .home:
@@ -4021,7 +4132,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 enterHome(pet, h, for: 0)
             }
         case .visit:
-            if let h = home(for: pet) { enterHome(pet, h, for: rnd(15, 40)) }
+            if let h = pet.orderHouse ?? home(for: pet) {
+                pet.orderHouse = nil
+                if h.style == .nest {
+                    sq.say("둥지 좋다~", 2)
+                } else {
+                    enterHome(pet, h, for: rnd(15, 40))
+                }
+            }
         case .feeder(let id):
             guard let f = mapObjs.first(where: { $0.id == id }), f.acorns > 0 else { return sq.say("비었네…", 1.4) }
             f.acorns -= 1
@@ -4119,8 +4237,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 } else {
                     sq.say("짝이 없네…", 1.6)
                 }
+            case let k? where !k.visitable:
+                // 시켜서 온 꾸미기 오브젝트
+                sq.say(k == .tree ? "도토리 언제 떨어지나~" : "\(k.title) 예쁘다~", 2)
+                sq.happyTime = 1.5
             case .plank?, .longPlank?, .cloud?, .crate?, .ladder?, .rock?:
-                if rnd(0, 1) < 0.5 { sq.say(["높다~!", "여기 좋다!", "경치 좋네~", "야호~!"].randomElement()!, 1.6) }
+                if ordered || rnd(0, 1) < 0.5 { sq.say(["높다~!", "여기 좋다!", "경치 좋네~", "야호~!"].randomElement()!, 1.6) }
             default:
                 break
             }
@@ -4381,6 +4503,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 pet.sq.greetTime = 6
             }
         }
+        pet.view.onPick = { [unowned self, unowned pet] in self.pick(pet) }
         pets.append(pet)
         return pet
     }
