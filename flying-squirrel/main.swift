@@ -597,6 +597,7 @@ final class Squirrel {
     var lively: CGFloat = 0.5   // 기분
     var jump: Jump?             // 발판으로 뛰는 중
     var keepSurface = false     // 목적지가 발판 위에 있어서 뛰어내리지 않고 걸어감
+    var perch: CGFloat = 0      // 좁은 발판 위에 앉아 있은 시간
     var personality = Personality.playful
     var name = ""
     // 지금이 이 다람쥐가 잘 시간인지
@@ -757,6 +758,17 @@ final class Squirrel {
             // 창이 사라지거나 가려지면 떨어짐, 창이 움직이면 같이 따라감
             guard let w = windows.first(where: { $0.id == id }), isPlatform(w), topVisible(w, x: pos.x)
             else { return fall() }
+            if w.kind == .custom, w.frame.width < 80, target == nil, act == .none, !nested {
+                speed = 0
+                pos.x += (w.frame.midX - pos.x) * min(1, dt * 4)
+                perch += dt
+                if perch > 5, !sleeping {
+                    perch = 0
+                    return hop(CGVector(dx: dir * 170, dy: 300))
+                }
+            } else {
+                perch = 0
+            }
             if pos.x < w.frame.minX + 6 || pos.x > w.frame.maxX - 6 {
                 if Bool.random() {
                     pos.x = min(max(pos.x, w.frame.minX + 6), w.frame.maxX - 6)
@@ -2965,6 +2977,8 @@ final class Pet {
     var objCheck = rnd(15, 30)
     var navFail: CGFloat = 0        // 못 가는 곳이었으면 잠깐 포기
     var bounceCool: CGFloat = 0
+    var stuckX: CGFloat = 0         // 길 찾아가다 한자리에서 맴도는지 보려고
+    var stuckTime: CGFloat = 0
     private var chaseCool: CGFloat = 0
     private var calm: CGFloat = 0
     private var mouseSpeed: CGFloat = 0
@@ -3612,6 +3626,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
             sq.rush = rush
+            if nav != nil, sq.mode == .floor, sq.act == .none, abs(sq.pos.x - pet.stuckX) < 10 {
+                pet.stuckTime += dt
+            } else {
+                pet.stuckTime = 0
+                pet.stuckX = sq.pos.x
+            }
+            if pet.stuckTime > 4 {
+                // 가다가 끼었으면 그만두고 내려와서 딴 데로
+                pet.stuckTime = 0
+                pet.goal = nil
+                pet.objGoal = nil
+                pet.wantsVisit = false
+                pet.navFail = 30
+                sq.target = nil
+                sq.say("에잇, 딴 데 갈래", 1.6)
+                if sq.surface != nil { sq.hop(CGVector(dx: sq.dir * 150, dy: 280)) }
+                continue
+            }
             if let n = nav, let g = goal {
                 switch navigate(sq, x: n.x, on: n.plat) {
                 case .walking: break
@@ -3691,7 +3723,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     enum Nav { case walking, arrived, unreachable }
 
     // 같은 면이면 걸어가고, 다른 면이면 갈 수 있는 길을 찾아서 폴짝
-    func navigate(_ sq: Squirrel, x: CGFloat, on target: Int?) -> Nav {
+    func navigate(_ sq: Squirrel, x rawX: CGFloat, on target: Int?) -> Nav {
+        let b = screenBounds(for: sq.pos)
+        let reach = { (v: CGFloat) in min(max(v, b.minX + 82), b.maxX - 82) }
+        let x = reach(rawX)
         guard sq.mode == .floor else {
             if sq.jump == nil { sq.target = x }
             return .walking
@@ -3708,8 +3743,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         guard let hop = firstHop(from: sq.surface, to: target) else { return .unreachable }
         sq.keepSurface = true
-        sq.target = hop.take
-        if abs(hop.take - sq.pos.x) < 6 {
+        let take = reach(hop.take)
+        sq.target = take
+        if abs(take - sq.pos.x) < 6 {
             sq.target = nil
             sq.leap(hop.jump)
         }
@@ -3868,6 +3904,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func bounce(_ pet: Pet) {
         let sq = pet.sq
         guard sq.mode == .floor, pet.bounceCool <= 0, (sq.surface ?? -1) < 0 || sq.surface == nil else { return }
+        var passing = pet.goal != nil
+        if case .obj(let id)? = pet.goal, let o = mapObjs.first(where: { $0.id == id }),
+           o.kind == .trampoline || o.kind == .cannon { passing = false }
+        guard !passing else { return }
         for t in mapObjs where (t.kind == .trampoline || t.kind == .cannon) && objPlat(t) == sq.surface
             && abs(t.pos.x - sq.pos.x) < 18 {
             pet.bounceCool = 1.2
