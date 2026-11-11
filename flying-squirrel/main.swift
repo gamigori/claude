@@ -1051,7 +1051,6 @@ let palette: [Character: (UInt8, UInt8, UInt8)] = [
     "g": (200, 184, 166),   // 털
     "x": (226, 214, 200),   // 빛 받은 털끝 (복슬복슬)
     "O": (104, 80, 70),     // 다람쥐 외곽선 (조금 부드럽게)
-    "H": (196, 214, 255),   // 눈 아래 작은 반짝
     "d": (150, 130, 114),   // 진한 털 (귀, 꼬리 테두리, 날개막 가장자리)
     "e": (172, 152, 136),   // 날개막
     "w": (252, 248, 240),   // 배
@@ -1267,7 +1266,101 @@ func closeEyes(_ g: inout Grid) {
     }
 }
 
-// 복슬복슬: 털 가장자리에 삐죽삐죽 털뭉치, 위쪽 털끝은 빛 받아 밝게, 눈엔 반짝 하나 더
+// MARK: 성격마다 다른 생김새 (장식은 성격과 짝이라 장식으로 구분)
+
+extension Accessory {
+    // 털 색: 장난꾸러기는 다람쥐색, 먹보는 황금빛 통통, 잠꾸러기는 회색빛, 겁쟁이는 크림색, 노래쟁이는 원래 색
+    var fur: [Character: (UInt8, UInt8, UInt8)] {
+        switch self {
+        case .cap: return ["g": (212, 168, 126), "d": (160, 114, 80), "x": (236, 206, 172), "e": (188, 144, 106)]
+        case .acornHat: return ["g": (220, 190, 140), "d": (172, 138, 94), "x": (242, 222, 186), "e": (198, 164, 120)]
+        case .nightcap: return ["g": (180, 180, 194), "d": (130, 130, 150), "x": (214, 214, 226), "e": (158, 158, 176)]
+        case .ribbon: return ["g": (232, 212, 202), "d": (192, 162, 154), "x": (248, 236, 230), "e": (216, 190, 182)]
+        case .flower: return [:]
+        }
+    }
+}
+
+// 눈 덩어리들 (반짝이가 있는 뜬 눈만)
+func openEyes(_ g: Grid) -> [[(Int, Int)]] {
+    var seen = Set<Int>(), out: [[(Int, Int)]] = []
+    let w = g.first?.count ?? 0
+    for y in g.indices {
+        for x in g[y].indices where (g[y][x] == "k" || g[y][x] == "h") && !seen.contains(y * w + x) {
+            var stack = [(x, y)], blob: [(Int, Int)] = []
+            seen.insert(y * w + x)
+            while let (cx, cy) = stack.popLast() {
+                blob.append((cx, cy))
+                for (nx, ny) in [(cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)]
+                where ny >= 0 && ny < g.count && nx >= 0 && nx < g[ny].count
+                    && (g[ny][nx] == "k" || g[ny][nx] == "h") && !seen.contains(ny * w + nx) {
+                    seen.insert(ny * w + nx)
+                    stack.append((nx, ny))
+                }
+            }
+            if blob.count >= 6 && blob.contains(where: { g[$0.1][$0.0] == "h" }) { out.append(blob) }
+        }
+    }
+    return out
+}
+
+func face(_ src: Grid, _ acc: Accessory, _ pose: Pose) -> Grid {
+    var g = src
+    let eyes = openEyes(g)
+    let mid = (g.first?.count ?? 0) / 2
+    func set(_ x: Int, _ y: Int, _ c: Character, onlyOn: Set<Character> = ["g"]) {
+        guard y >= 0, y < g.count, x >= 0, x < g[y].count, onlyOn.contains(g[y][x]) else { return }
+        g[y][x] = c
+    }
+    switch acc {
+    case .cap:
+        // 장난꾸러기: 메롱~ 혀를 쏙 내밀고 있음 (입 다문 앞모습)
+        // (장식 때문에 위로 늘어난 만큼 내려서)
+        if case .front(open: false, _) = pose {
+            let dy = g.count - frontBody.count
+            set(11, 9 + dy, "p", onlyOn: ["w"]); set(11, 10 + dy, "m", onlyOn: ["w"])
+        }
+    case .acornHat:
+        // 먹보: 볼이 빵빵하게 양옆으로 한 칸씩
+        for y in g.indices {
+            guard let px = g[y].firstIndex(of: "p") else { continue }
+            if let l = g[y].firstIndex(where: { $0 != "." }), l > 0, l <= px { g[y][l - 1] = "g" }
+            if let pr = g[y].lastIndex(of: "p"), pr != px,
+               let r = g[y][..<min(g[y].count, pr + 4)].lastIndex(where: { $0 != "." }), r + 1 < g[y].count, g[y][r + 1] == "." {
+                g[y][r + 1] = "g"
+            }
+            for x in g[y].indices where g[y][x] == "p" { set(x + (x < mid ? -1 : 1), y, "p") }
+        }
+    case .nightcap:
+        // 잠꾸러기: 눈꺼풀이 반쯤 내려온 졸린 눈
+        for e in eyes {
+            let top = e.map(\.1).min()!
+            for (x, y) in e where y == top { g[y][x] = "d" }
+            if !e.contains(where: { g[$0.1][$0.0] == "h" }) {
+                if let (x, y) = e.filter({ $0.1 == top + 1 }).min(by: { $0.0 < $1.0 }) { g[y][x] = "h" }
+            }
+        }
+    case .ribbon:
+        // 겁쟁이: 수줍게 아래를 보는 눈, 볼이 더 발그레
+        for e in eyes {
+            let hs = e.filter { g[$0.1][$0.0] == "h" }
+            for (x, y) in hs { g[y][x] = "k"; set(x, y + 1, "h", onlyOn: ["k"]) }
+        }
+        for y in g.indices { for x in g[y].indices where src[y][x] == "p" { set(x, y + 1, "p", onlyOn: ["g", "w"]) } }
+    case .flower:
+        // 노래쟁이: 바깥쪽 위에 속눈썹
+        for e in eyes {
+            let top = e.map(\.1).min()!, xs = e.filter { $0.1 == top }.map(\.0)
+            let left = (xs.min()! + xs.max()!) / 2 < mid
+            let ex = left ? e.map(\.0).min()! - 1 : e.map(\.0).max()! + 1
+            set(ex, top, "k")
+            set(left ? ex - 1 : ex + 1, top - 1, "k")
+        }
+    }
+    return g
+}
+
+// 복슬복슬: 털 가장자리에 삐죽삐죽 털뭉치, 위쪽 털끝은 빛 받아 밝게
 func fluffy(_ src: Grid) -> Grid {
     var g = pad(src, t: 1, l: 1, r: 1, b: 0)
     let base = g
@@ -1291,13 +1384,6 @@ func fluffy(_ src: Grid) -> Grid {
     let shaped = g
     for y in shaped.indices {
         for x in shaped[y].indices where shaped[y][x] == "g" && (y == 0 || shaped[y - 1][x] == ".") { g[y][x] = "x" }
-    }
-    // 큰 눈엔 오른쪽 아래에 작은 반짝
-    for y in shaped.indices {
-        for x in shaped[y].indices where shaped[y][x] == "h" {
-            let tx = x + 1, ty = y + 2
-            if ty < shaped.count, tx < shaped[ty].count, shaped[ty][tx] == "k", shaped[ty - 1][tx] == "k" { g[ty][tx] = "H" }
-        }
     }
     return g
 }
@@ -1510,8 +1596,9 @@ func sprite(_ pose: Pose, _ acc: Accessory? = nil) -> CGImage {
     case .climb, .side, .front, .think, .eat, .glide, .wave, .startle: animal = true
     default: animal = false
     }
+    if animal, let acc = acc { g = face(g, acc, pose) }
     if animal { g = fluffy(g) }
-    let s = image(outlined(pad(g, t: 1, l: 1, r: 1, b: 1), ink: animal ? "O" : "o"))
+    let s = image(outlined(pad(g, t: 1, l: 1, r: 1, b: 1), ink: animal ? "O" : "o"), animal ? (acc?.fur ?? [:]) : [:])
     spriteCache[key] = s
     return s
 }
@@ -4701,6 +4788,28 @@ func snapshot(_ dir: String) {
         flat.unlockFocus()
         let rep = NSBitmapImageRep(data: flat.tiffRepresentation!)!
         try? rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
+    }
+    // 성격별 생김새: 앞모습, 옆모습, 활강
+    do {
+        let cell: CGFloat = 130, k: CGFloat = 4
+        let img = NSImage(size: NSSize(width: cell * 5, height: cell * 3 + 24))
+        img.lockFocus()
+        NSColor(white: 0.95, alpha: 1).setFill()
+        NSRect(origin: .zero, size: img.size).fill()
+        let c = NSGraphicsContext.current!.cgContext
+        c.interpolationQuality = .none
+        for (i, pers) in Personality.allCases.enumerated() {
+            for (j, pose) in [Pose.front(open: false, happy: false), .side(0, false), .glide].enumerated() {
+                let sp = sprite(pose, pers.accessory)
+                let w = CGFloat(sp.width) * k, h = CGFloat(sp.height) * k
+                c.draw(sp, in: CGRect(x: cell * CGFloat(i) + (cell - w) / 2, y: cell * CGFloat(2 - j) + 6, width: w, height: h))
+            }
+            ((pers.emoji + " " + pers.title) as NSString).draw(at: CGPoint(x: cell * CGFloat(i) + 30, y: cell * 3 + 4),
+                withAttributes: [.font: NSFont.boldSystemFont(ofSize: 13)])
+        }
+        img.unlockFocus()
+        let rep = NSBitmapImageRep(data: img.tiffRepresentation!)!
+        try? rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "\(dir)/looks.png"))
     }
     // 그림 팔레트
     mapEditor.build()
