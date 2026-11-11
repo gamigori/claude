@@ -86,6 +86,7 @@ struct Jump {
     enum Kind { case arc, climb, warp, slide }
     var kind: Kind = .arc   // 포물선 점프, 사다리 타기, 포털
     var to: CGPoint = .zero // 포털이면 나오는 곳
+    var drop = false        // 끝나면 내려앉지 않고 그 자리에서 떨어짐 (풍선)
 
     func point(_ t: CGFloat) -> CGPoint {
         switch kind {
@@ -676,7 +677,7 @@ final class Squirrel {
             feet = p.y
             if j.t >= j.T {
                 jump = nil
-                land(on: j.surface, ground: p.y)
+                if j.drop { fall() } else { land(on: j.surface, ground: p.y) }
             } else {
                 jump = j
             }
@@ -2062,7 +2063,8 @@ final class House {
 enum ObjKind: String, CaseIterable {
     case plank, longPlank, cloud, crate, ladder, portal
     case feeder, water, tree, trampoline, cannon, wheel, slide, ball, campfire, speaker, mirror
-    case flowerPot, lamp, mushroom, bush, fence
+    case spring, rock, balloon, drum, pond, clock, vane, chest, telescope, mailbox, flag
+    case flowerPot, lamp, mushroom, bush, fence, snowman, cactus, flowers
 
     var title: String {
         switch self {
@@ -2088,6 +2090,20 @@ enum ObjKind: String, CaseIterable {
         case .mushroom: return "버섯"
         case .bush: return "덤불"
         case .fence: return "울타리"
+        case .spring: return "점프 발판"
+        case .rock: return "바위"
+        case .balloon: return "풍선"
+        case .drum: return "북"
+        case .pond: return "연못"
+        case .clock: return "시계탑"
+        case .vane: return "풍향계"
+        case .chest: return "보물상자"
+        case .telescope: return "망원경"
+        case .mailbox: return "우체통"
+        case .flag: return "깃발"
+        case .snowman: return "눈사람"
+        case .cactus: return "선인장"
+        case .flowers: return "꽃밭"
         }
     }
 
@@ -2110,16 +2126,27 @@ enum ObjKind: String, CaseIterable {
         case .campfire: return "와서 불을 쬐면 기분이 좋아져요"
         case .speaker: return "노래가 나오면 앞에 와서 춤을 춰요"
         case .mirror: return "와서 자기 모습을 구경해요"
-        case .mushroom, .bush, .fence: return "꾸미기용"
+        case .mushroom, .bush, .fence, .snowman, .cactus, .flowers: return "꾸미기용"
+        case .spring: return "공중에 띄우는 발판. 올라가면 높이 튀어 올라요"
+        case .rock: return "올라설 수 있는 낮은 바위"
+        case .balloon: return "붙잡고 두둥실 떠올랐다가 활강해요"
+        case .drum: return "올라가서 둥둥둥 두드려요"
+        case .pond: return "첨벙첨벙 물놀이를 해요"
+        case .clock: return "와서 지금 몇 시인지 알려줘요"
+        case .vane: return "와서 오늘 날씨를 알려줘요"
+        case .chest: return "열어 보면 가끔 도토리가 나와요"
+        case .telescope: return "멀리 구경해요 (밤엔 별 구경)"
+        case .mailbox: return "편지가 왔나 확인해요"
+        case .flag: return "탑 꼭대기에 꽂아 두면 올라와서 \"정상 정복!\""
         }
     }
 
     // 위에 올라설 수 있음
-    var isPlatform: Bool { [.plank, .longPlank, .cloud, .crate, .ladder, .slide].contains(self) }
+    var isPlatform: Bool { [.plank, .longPlank, .cloud, .crate, .ladder, .slide, .spring, .rock].contains(self) }
     // 심심할 때 놀러 가는 곳
-    var visitable: Bool { ![.feeder, .flowerPot, .lamp, .tree, .mushroom, .bush, .fence].contains(self) }
+    var visitable: Bool { ![.feeder, .flowerPot, .lamp, .tree, .mushroom, .bush, .fence, .snowman, .cactus, .flowers].contains(self) }
     // 공중에 띄워 놓음 (아니면 아래 면에 내려앉음)
-    var floats: Bool { [.plank, .longPlank, .cloud].contains(self) }
+    var floats: Bool { [.plank, .longPlank, .cloud, .spring].contains(self) }
 
     // n: 사료통이면 쌓인 도토리 수, 가로등이면 불 켜짐(1), 쳇바퀴면 도는 프레임
     func art(_ n: Int) -> [String] {
@@ -2202,6 +2229,33 @@ enum ObjKind: String, CaseIterable {
         case .mirror:
             return [".jjjjjj.", "jGGGGGGj", "jGhGGGGj", "jGGhGGGj", "jGGGGGGj", "jGGGGGGj", "jGGGGhGj", "jGGGGGGj",
                     ".jjjjjj.", "...jj...", "...jj...", ".jjjjjj."]
+        case .spring: return ["rrrrrrrrrrrrrrrr", "RRRRRRRRRRRRRRRR", "..zZz......zZz..", ".zzzzz....zzzzz."]
+        case .rock: return ["...zzzzzz.....", ".zzzzzzzzzz...", "zzzZzzzzzzzzz.", "zzzzzzzZzzzzzz", "zZzzzzzzzzzZzz", ".ZZZZZZZZZZZZ."]
+        case .balloon:
+            return ["..rrrr..", ".rrRrrr.", "rrRrrrrr", "rrrrrrrr", "rrrrrrrr", ".rrrrrr.", "..rrrr..", "...rr...",
+                    "...S....", "....S...", "...S....", "....S...", "...S....", "....S...", "...S....", "..VVV..."]
+        case .drum: return [".SSSSSSSS.", "rSSSSSSSSr", "rjrrjrrjrr", "rrjrrjrrjr", "rjrrjrrjrr", "rrrrrrrrrr", ".V......V."]
+        case .pond: return [".LccccccccccccL.", "LcchccccccCccccL", ".LCCCCCCCCCCCCL."]
+        case .clock:
+            return [".VVVVVV.", "VSSSSSSV", "VSSoSSSV", "VSSoSSSV", "VSSoooSV", "VSSSSSSV", "VSSSSSSV", ".VVVVVV."]
+                + Array(repeating: "..VWWV..", count: 7) + [".VVVVVV."]
+        case .vane:
+            return ["...r.....", "rrrrrrr..", "...r..rr.", "....o...."] + Array(repeating: "....o....", count: 8) + ["..ooooo.."]
+        case .chest: return [".VVVVVVVV.", "VWWWWWWWWV", "VWWWjjWWWV", "VVVVjjVVVV", "VWWWWWWWWV", "VWWWWWWWWV", "VVVVVVVVVV"]
+        case .telescope:
+            return ["......zzZ.", ".....zzZ..", "....zzZ...", "...zzZ....", "..zzZ.....", "...oo.....", "..o..o....",
+                    ".o....o...", "o......o.."]
+        case .mailbox:
+            return [".rrrrr.", "rrrrrrr", "rRRRRrr", "rrrrrrj", "rrrrrrr", "...V...", "...V...", "...V...", "...V...", "..VVV.."]
+        case .flag:
+            return ["oSrrrrr.", ".Srrrrrr", ".Srrrrr.", ".Srrrr..", ".Srr...."] + Array(repeating: ".S......", count: 10) + ["VVV....."]
+        case .snowman:
+            return ["..oooo..", "...oo...", "..hhhh..", ".hkhhkh.", ".hhPPhh.", "..hhhh..", ".hhhhhh.", "hhhohhhh",
+                    "hhhhhhhh", "hhhohhhh", ".hhhhhh.", "..GGGG.."]
+        case .cactus:
+            return ["...LL....", "...LK..L.", "L..LK..L.", "L..LLLLK.", "LLLLK....", "...LK....", "...LK....", "...LK....",
+                    "..PPPP...", "..PPPP..."]
+        case .flowers: return ["p..j..p..j..", "Lp.Lj.Lp.Lj.", ".L..L..L..L.", "LLLLLLLLLLLL"]
         case .mushroom: return [".rrrrr.", "rRrrRrr", "rrrRrrr", "..SSs..", "..SSs..", "..SSs.."]
         case .bush: return ["...LLL..LLL.", ".LLLLLLLLLLK", "LLpLLLLLpLKK", "LLLLLpLLLLKK", "LLLLLLLLLKKK", ".LLKKLLKKKK."]
         case .fence: return ["W...W...W...W", "W...W...W...W", "WWWWWWWWWWWWW", "W...W...W...W", "VVVVVVVVVVVVV",
@@ -2224,7 +2278,9 @@ enum ObjKind: String, CaseIterable {
         let s = size, pad: CGFloat = self == .ladder ? 8 : 0
         // 미끄럼틀은 왼쪽 꼭대기 단만
         if self == .slide { return Plat(id: id, minX: p.x - s.width / 2, maxX: p.x - s.width / 2 + 9 * P, y: p.y + s.height) }
-        return Plat(id: id, minX: p.x - s.width / 2 - pad, maxX: p.x + s.width / 2 + pad, y: p.y + s.height)
+        // 구름과 바위는 울퉁불퉁한 윗부분 말고 평평한 줄에 섬
+        let dip: CGFloat = self == .cloud ? 2 * P : self == .rock ? P : 0, inX: CGFloat = self == .cloud ? P : 0
+        return Plat(id: id, minX: p.x - s.width / 2 - pad + inX, maxX: p.x + s.width / 2 + pad - inX, y: p.y + s.height - dip)
     }
 }
 
@@ -2340,11 +2396,10 @@ final class MapObj {
 
     var plat: Plat { kind.plat(id: id, at: pos) }
 
-    // 떨어지던 다람쥐가 걸리는 자리 (사다리는 맨 위 칸만)
+    // 떨어지던 다람쥐가 걸리는 자리: 올라서는 면 바로 아래의 얇은 띠
     var landing: CGRect {
         let p = plat
-        if kind == .ladder || kind == .slide { return CGRect(x: p.minX, y: p.y - 8, width: p.maxX - p.minX, height: 8) }
-        return frame
+        return CGRect(x: p.minX, y: p.y - 8, width: p.maxX - p.minX, height: 8)
     }
 
     func redraw() {
@@ -2703,7 +2758,7 @@ final class Tile: NSView {
         box.stroke()
         if let img = image {
             let s = img.size
-            img.draw(in: NSRect(x: ((bounds.width - s.width) / 2).rounded(), y: (20 + (44 - s.height) / 2).rounded(),
+            img.draw(in: NSRect(x: ((bounds.width - s.width) / 2).rounded(), y: (19 + (38 - s.height) / 2).rounded(),
                                 width: s.width, height: s.height))
         }
         let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 10, weight: selected ? .bold : .regular),
@@ -2723,6 +2778,8 @@ final class MapEditor: NSObject {
     var onErase: ((MapObj) -> Void)?
     var onChange: (() -> Void)?
     var onDone: (() -> Void)?
+    var onReset: (() -> Void)?
+    var onSweep: (() -> Void)?
     lazy var houseGhost: CGImage? = houseIcon()
     var panel: NSPanel?
     private var overlay: NSWindow?
@@ -2756,22 +2813,22 @@ final class MapEditor: NSObject {
 
     // 그림이 들어간 칸 하나
     private func tile(_ title: String, _ image: NSImage?, tag: Int, tip: String) -> Tile {
-        let t = Tile(frame: NSRect(x: 0, y: 0, width: 76, height: 70))
+        let t = Tile(frame: NSRect(x: 0, y: 0, width: 66, height: 62))
         t.title = title
         t.image = image
         t.tileTag = tag
         t.toolTip = tip
         t.onClick = { [unowned self, unowned t] in self.select(t.selected ? nil : t.tileTag) }
         t.translatesAutoresizingMaskIntoConstraints = false
-        t.widthAnchor.constraint(equalToConstant: 76).isActive = true
-        t.heightAnchor.constraint(equalToConstant: 70).isActive = true
+        t.widthAnchor.constraint(equalToConstant: 66).isActive = true
+        t.heightAnchor.constraint(equalToConstant: 62).isActive = true
         buttons.append(t)
         return t
     }
 
     // 픽셀 그림을 칸에 맞는 크기로 (정수 배율로만 줄여서 또렷하게)
     private func icon(_ img: CGImage) -> NSImage {
-        let k = min(40 / CGFloat(img.width), 40 / CGFloat(img.height), 3)
+        let k = min(34 / CGFloat(img.width), 34 / CGFloat(img.height), 3)
         let size = NSSize(width: (CGFloat(img.width) * k).rounded(), height: (CGFloat(img.height) * k).rounded())
         let out = NSImage(size: size)
         out.lockFocus()
@@ -2804,9 +2861,9 @@ final class MapEditor: NSObject {
         tiles.append(tile("지우개", NSImage(systemSymbolName: "eraser", accessibilityDescription: nil),
                           tag: MapEditor.eraserTag, tip: "누른 오브젝트를 지워요"))
         var rows: [[NSView]] = []
-        for i in stride(from: 0, to: tiles.count, by: 4) {
-            var row: [NSView] = Array(tiles[i..<min(i + 4, tiles.count)])
-            while row.count < 4 { row.append(NSGridCell.emptyContentView) }
+        for i in stride(from: 0, to: tiles.count, by: 6) {
+            var row: [NSView] = Array(tiles[i..<min(i + 6, tiles.count)])
+            while row.count < 6 { row.append(NSGridCell.emptyContentView) }
             rows.append(row)
         }
         let grid = NSGridView(views: rows)
@@ -2820,14 +2877,20 @@ final class MapEditor: NSObject {
         hintLabel = NSTextField(wrappingLabelWithString: "")
         hintLabel.font = .systemFont(ofSize: 11)
         hintLabel.textColor = .secondaryLabelColor
-        hintLabel.preferredMaxLayoutWidth = 320
+        hintLabel.preferredMaxLayoutWidth = 400
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
         hintLabel.heightAnchor.constraint(equalToConstant: 84).isActive = true
         stack.addArrangedSubview(hintLabel)
         let done = NSButton(title: "다 꾸몄어요", target: self, action: #selector(finish))
         done.bezelStyle = .rounded
         done.keyEquivalent = "\r"
-        stack.addArrangedSubview(done)
+        let reset = NSButton(title: "맵 초기화", target: self, action: #selector(reset))
+        reset.bezelStyle = .rounded
+        let sweep = NSButton(title: "묻은 도토리 치우기", target: self, action: #selector(sweep))
+        sweep.bezelStyle = .rounded
+        let row = NSStackView(views: [done, reset, sweep])
+        row.spacing = 8
+        stack.addArrangedSubview(row)
         p.contentView = stack
         p.setContentSize(stack.fittingSize)
         let vf = NSScreen.screens[0].visibleFrame
@@ -2862,6 +2925,8 @@ final class MapEditor: NSObject {
     }
 
     @objc func finish() { onDone?() }
+    @objc func reset() { onReset?() }
+    @objc func sweep() { onSweep?() }
 }
 
 extension MapEditor: NSWindowDelegate {
@@ -3072,6 +3137,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         houseItem = menu.addItem(withTitle: "다람쥐 집 (꾸미기, 주인 정하기)", action: nil, keyEquivalent: "")
         editItem = menu.addItem(withTitle: "맵 꾸미기 (발판, 사료통…)", action: #selector(toggleEdit), keyEquivalent: "e")
+        menu.addItem(withTitle: "맵 초기화…", action: #selector(resetMap), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "묻어둔 도토리 치우기", action: #selector(clearStash), keyEquivalent: "").target = self
         editItem.target = self
         menu.addItem(.separator())
         petsHeader = menu.addItem(withTitle: "우리 다람쥐들 (성격 바꾸기)", action: nil, keyEquivalent: "")
@@ -3091,6 +3158,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             o.window.orderFrontRegardless()
             self.mapChanged()
         }
+        mapEditor.onReset = { [unowned self] in self.resetMap() }
+        mapEditor.onSweep = { [unowned self] in self.clearStash() }
         mapEditor.onPlaceHouse = { [unowned self] p in
             self.addHouse(at: p)
             mapEditor.select(nil)
@@ -3536,7 +3605,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     case .water?: sq.say("목말라~", 1.6)
                     case .portal?: sq.say("포털 타고 슝~", 1.6)
                     case .ladder?: sq.say("사다리 올라가 볼까?", 1.6)
-                    default: sq.say("저기 올라가 볼까?", 1.6)
+                    case let k?: sq.say(k.isPlatform ? "저기 올라가 볼까?" : "\(k.title) 보러 갈래~", 1.6)
+                    default: break
                     }
                 default: break
                 }
@@ -3696,6 +3766,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .mirror?:
                 sq.say(["나 좀 귀엽네?", "털 정리 좀 하고~", "거기 누구야?", "오늘도 멋져!"].randomElement()!, 2.2)
                 sq.happyTime = 1.5
+            case .spring?:
+                sq.hop(CGVector(dx: sq.dir * 110, dy: 1050))
+                sq.say("뿅~!", 1.2)
+                needs.cheer(0.02)
+            case .balloon?:
+                sq.leap(Jump(from: CGPoint(x: sq.pos.x, y: sq.feet), v: CGVector(dx: sq.dir * 22, dy: 110), T: 3,
+                             surface: nil, kind: .slide, drop: true))
+                sq.say("두둥실~", 2.4)
+                needs.cheer(0.03)
+            case .drum?:
+                sq.say("둥둥둥!", 1.4)
+                sq.hop(CGVector(dx: 0, dy: 330))
+                needs.cheer(0.02)
+            case .pond?:
+                sq.say(["첨벙첨벙!", "시원하다~", "앗 차가워!"].randomElement()!, 2)
+                sq.happyTime = 2
+                needs.cheer(0.04)
+            case .clock?:
+                let now = Calendar.current.dateComponents([.hour, .minute], from: Date())
+                sq.say("지금은 \(now.hour ?? 0)시 \(now.minute ?? 0)분!", 2.6)
+            case .vane?:
+                switch world.weather {
+                case .rain: sq.say("오늘은 비가 와~ 우산 챙겨!", 2.6)
+                case .snow: sq.say("눈이다 눈!!", 2.6)
+                case .clear: sq.say(weatherReact ? "오늘은 맑음!" : "바람이 살랑살랑~", 2.6)
+                }
+            case .chest?:
+                if rnd(0, 1) < 0.3, freeAcorns.count < 2 {
+                    sq.say("도토리가 들어 있네!", 2)
+                    acorns.append(Acorn(at: CGPoint(x: sq.pos.x + sq.dir * 40, y: sq.feet + 90)))
+                } else {
+                    sq.say(["반짝! 보물이다~", "오늘은 비었네…", "내 보물 잘 있나~"].randomElement()!, 2)
+                }
+                sq.happyTime = 1.5
+            case .telescope?:
+                sq.say(world.night ? "별이 예쁘다~" : ["저~ 멀리까지 보여!", "저기 새다!"].randomElement()!, 2.4)
+            case .mailbox?:
+                sq.say(["편지 왔나?", "오늘은 없네…", "택배다!"].randomElement()!, 2)
+            case .flag?:
+                sq.say("정상 정복!", 2)
+                sq.flip()
+                needs.cheer(0.04)
             case .wheel?:
                 sq.runTime = rnd(4, 7)
                 sq.say("달려라 달려~!", 1.6)
@@ -3715,7 +3827,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 } else {
                     sq.say("짝이 없네…", 1.6)
                 }
-            case .plank?, .longPlank?, .cloud?, .crate?, .ladder?:
+            case .plank?, .longPlank?, .cloud?, .crate?, .ladder?, .rock?:
                 if rnd(0, 1) < 0.5 { sq.say(["높다~!", "여기 좋다!", "경치 좋네~", "야호~!"].randomElement()!, 1.6) }
             default:
                 break
@@ -3743,7 +3855,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .filter { o in o.id != here && reachable(from: here, to: objPlat(o)) }
         // 노래가 나오면 스피커 앞으로
         if music.playing, singAlong, rnd(0, 1) < 0.6, let sp = ok.first(where: { $0.kind == .speaker }) { return sp.id }
-        let fun = ok.filter { [.trampoline, .cannon, .wheel, .portal, .slide, .ball].contains($0.kind) }
+        let fun = ok.filter { [.trampoline, .cannon, .wheel, .portal, .slide, .ball, .spring, .balloon, .drum, .pond, .flag].contains($0.kind) }
         let high = ok.filter { $0.kind.isPlatform }
         switch sq.personality {
         case .playful: return (fun + fun + high).randomElement()?.id
@@ -3826,6 +3938,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         saveHouses()
         refreshWindows()
         saveMap()
+    }
+
+    // 놓은 오브젝트를 전부 치움 (집은 그대로 두고 바닥으로 내려옴)
+    @objc func resetMap() {
+        guard !mapObjs.isEmpty else { return }
+        let alert = NSAlert()
+        alert.messageText = "맵을 초기화할까요?"
+        alert.informativeText = "놓아 둔 오브젝트 \(mapObjs.count)개가 모두 사라져요. 집과 다람쥐는 그대로예요."
+        alert.addButton(withTitle: "초기화")
+        alert.addButton(withTitle: "취소")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.window.level = .modalPanel
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        for o in mapObjs { o.window.orderOut(nil) }
+        mapObjs = []
+        mapEditor.focus = nil
+        for p in pets { p.objGoal = nil }
+        mapChanged()
+    }
+
+    // 바닥에 묻어 둔 도토리를 전부 치움
+    @objc func clearStash() {
+        for m in mounds { m.window.orderOut(nil) }
+        mounds = []
+        needs.stash = []
+        needs.save()
+        for p in pets { if case .stash? = p.goal { p.goal = nil; p.sq.target = nil } }
+        pets.first { !$0.inside }?.sq.say("내 도토리 어디 갔지?!", 2)
     }
 
     func saveMap() {
@@ -4042,7 +4182,8 @@ func snapshot(_ dir: String) {
                MapObj(.campfire, at: CGPoint(x: base.x + 500, y: base.y)), MapObj(.ball, at: CGPoint(x: base.x + 560, y: base.y)),
                MapObj(.speaker, at: CGPoint(x: base.x + 820, y: base.y)), MapObj(.mirror, at: CGPoint(x: base.x + 860, y: base.y)),
                MapObj(.mushroom, at: CGPoint(x: base.x + 64, y: base.y)), MapObj(.bush, at: CGPoint(x: base.x + 580, y: base.y + 204)),
-               MapObj(.fence, at: CGPoint(x: base.x + 700, y: base.y))]
+               MapObj(.fence, at: CGPoint(x: base.x + 700, y: base.y)),
+               MapObj(.flag, at: CGPoint(x: base.x + 660, y: base.y + 400)), MapObj(.spring, at: CGPoint(x: base.x + 288, y: base.y + 288))]
     settleObjects()
     do {
         let v = OverlayView(frame: NSRect(x: 0, y: 0, width: 980, height: 640))
