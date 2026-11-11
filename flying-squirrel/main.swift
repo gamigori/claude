@@ -1156,8 +1156,8 @@ let frontBody = [
 // 옆모습, 머리가 오른쪽. 마지막 두 줄은 다리 자리
 let sideBody = [
     "...ggg........gg..gg....",
-    "..gggxg......gddggddg...",
-    ".ggdggxg....gggggggggg..",
+    "..ggggg......gddggddg...",
+    ".ggdgggg....gggggggggg..",
     "ggdddggg...gggggggggggg.",
     "gggddggg...ggggggkkkggg.",
     ".gggdgggg.gggggggkhkgggn",
@@ -1360,7 +1360,7 @@ func face(_ src: Grid, _ acc: Accessory, _ pose: Pose) -> Grid {
     return g
 }
 
-// 복슬복슬: 털 가장자리에 삐죽삐죽 털뭉치, 위쪽 털끝은 빛 받아 밝게
+// 복슬복슬: 털 가장자리에 삐죽삐죽 털뭉치
 func fluffy(_ src: Grid) -> Grid {
     var g = pad(src, t: 1, l: 1, r: 1, b: 0)
     let base = g
@@ -1379,11 +1379,6 @@ func fluffy(_ src: Grid) -> Grid {
             else if at(x - 1, y) == "." && at(x, y - 1) != "." && y > 1 { g[y][x - 1] = base[y][x] }
             else if at(x + 1, y) == "." && at(x, y - 1) != "." && y > 1 { g[y][x + 1] = base[y][x] }
         }
-    }
-    // 위가 비어 있는 털은 빛 받은 털끝
-    let shaped = g
-    for y in shaped.indices {
-        for x in shaped[y].indices where shaped[y][x] == "g" && (y == 0 || shaped[y - 1][x] == ".") { g[y][x] = "x" }
     }
     return g
 }
